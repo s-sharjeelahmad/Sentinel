@@ -14,21 +14,12 @@
 # Stage 1: Builder - Install dependencies
 FROM python:3.11-slim as builder
 
-# Build argument for PyTorch variant (cpu or cu118)
-# Default: cpu (faster builds, smaller image)
-# Override: docker build --build-arg TORCH_VARIANT=cu118
-ARG TORCH_VARIANT=cpu
-
 WORKDIR /app
 
 # Copy requirements FIRST (better layer caching)
 COPY requirements.txt .
 
-# Install PyTorch with specified variant
-# CPU: 800MB, GPU (cu118): 2.5GB
-RUN pip install --no-cache-dir torch>=2.0.0 --index-url https://download.pytorch.org/whl/${TORCH_VARIANT}
-
-# Install remaining dependencies
+# Install remaining dependencies (removed torch - using HF Inference API)
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: Runtime - Minimal production image
