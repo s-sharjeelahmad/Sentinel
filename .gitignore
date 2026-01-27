@@ -51,6 +51,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+sentinel.log
 
 # Testing
 .pytest_cache/
@@ -58,6 +59,8 @@ logs/
 htmlcov/
 .tox/
 .hypothesis/
+test_results.txt
+*_results.txt
 
 # Redis dump
 dump.rdb
@@ -68,3 +71,7 @@ dump.rdb
 # Docker
 .dockerignore
 docker-compose.override.yml
+
+# Temporary documentation (generated during testing)
+DEPLOYMENT_SUCCESS.md
+SUMMARY.txt

@@ -1,8 +1,6 @@
 # Docker Compose for local development and testing
 # Runs Sentinel + Redis together
 
-version: '3.8'
-
 services:
   # Redis cache service
   redis:
@@ -41,7 +39,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
     restart: unless-stopped
     volumes:
       # Mount code for development (hot reload)

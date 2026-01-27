@@ -7,6 +7,7 @@ import logging
 import time
 import asyncio
 from datetime import datetime
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -32,14 +33,8 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# FASTAPI APP SETUP
+# LIFECYCLE MANAGEMENT
 # ============================================================================
-
-app = FastAPI(
-    title="Sentinel",
-    description="Semantic AI Gateway with intelligent caching",
-    version="0.1.0",
-)
 
 # Global cache instance (will be initialized on startup)
 cache = RedisCache(
@@ -49,29 +44,37 @@ cache = RedisCache(
 )
 
 
-# ============================================================================
-# LIFECYCLE EVENTS
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize Redis, embedding model, and LLM provider on application startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern FastAPI lifespan context manager for startup/shutdown."""
+    # Startup
     try:
         await cache.connect()
         embedding_model.load()
         await initialize_llm_provider()
         logger.info("🚀 Sentinel started successfully")
     except Exception as e:
-        logger.error(f"Failed to start Sentinel: {e}")
+        logger.error(f"❌ Failed to start Sentinel: {e}")
         raise
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Disconnect from Redis and LLM provider on application shutdown."""
+    
+    yield  # Application runs here
+    
+    # Shutdown
     await cleanup_llm_provider()
     await cache.disconnect()
     logger.info("👋 Sentinel shut down gracefully")
+
+
+# ============================================================================
+# FASTAPI APP SETUP
+# ============================================================================
+
+app = FastAPI(
+    title="Sentinel",
+    description="Semantic AI Gateway with intelligent caching",
+    version="0.1.0",
+    lifespan=lifespan,
+)
 
 
 # ============================================================================

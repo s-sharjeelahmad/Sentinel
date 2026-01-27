@@ -38,8 +38,12 @@ class RedisCache:
             ttl_seconds: Time-to-live for cached entries (default: 1 hour)
             key_prefix: Prefix for all keys to avoid collisions (default: "sentinel:cache:")
         """
-        # Prefer explicit argument, otherwise read from environment, fallback to localhost
-        self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379")
+        # Prefer explicit argument, otherwise read from environment
+        self.redis_url = redis_url or os.getenv("REDIS_URL")
+        if not self.redis_url:
+            raise ValueError(
+                "Redis URL is required. Set REDIS_URL environment variable or pass redis_url parameter."
+            )
         self.ttl_seconds = ttl_seconds
         self.key_prefix = key_prefix
         self.client: Optional[redis.Redis] = None

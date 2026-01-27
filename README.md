@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
 
 ---
 
@@ -16,6 +17,7 @@ Sentinel is a **semantic AI gateway** that sits between your application and LLM
 - ✅ **Improve latency by 200x** - 5ms cache hits vs 1000ms API calls
 - ✅ **Prevent redundant API calls** - Exact and semantic matching
 - ✅ **Track usage metrics** - Monitor hit rates, costs, latency
+- ✅ **Production optimized** - Model pre-cached, modern FastAPI lifespan, strict validation
 
 ---
 
@@ -26,7 +28,7 @@ Sentinel is a **semantic AI gateway** that sits between your application and LLM
 | **Semantic Caching** | Uses sentence transformers (384D embeddings) to match similar queries |
 | **Multi-Provider**   | Support for Groq (default), OpenAI, and extensible architecture       |
 | **Production-Ready** | Docker, async I/O, error handling, logging, metrics                   |
-| **Fast**             | Redis-backed cache with connection pooling                            |
+| **Fast**             | Redis-backed cache with connection pooling, instant startup           |
 | **Configurable**     | Similarity thresholds, TTL, model selection                           |
 
 ---
