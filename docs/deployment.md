@@ -6,201 +6,158 @@
 
 ```bash
 docker-compose up -d
-curl http://localhost:8001/health
+curl http://localhost:8000/health
 ```
 
-**Cloud Deployment (Fly.io):**
+**Cloud Deployment (Fly.io - FREE):**
 
 ```bash
-fly deploy --vm-size shared-cpu-1x
+flyctl deploy
 ```
 
 ---
 
-## 1. Docker Compose (Local Development)
+## 1. Docker Compose (Local)
 
-### Prerequisites
+**Prerequisites:**
 
-- Docker Desktop installed
-- `.env` file with `GROQ_API_KEY`
+- Docker Desktop
+- `.env` with `GROQ_API_KEY` and `HF_API_TOKEN`
 
-### Commands
+**Essential Commands:**
 
 ```bash
-# Start services
-docker-compose up -d
-
-# View logs (use SERVICE NAME, not container name)
-docker-compose logs sentinel --tail=50
-docker-compose logs -f sentinel  # Follow live
-
-# Check status
-docker-compose ps
-
-# Restart
-docker-compose restart sentinel
-
-# Stop and clean up
-docker-compose down
-docker-compose down -v  # Also remove volumes
+docker-compose up -d                  # Start services
+docker-compose logs sentinel          # View logs (service name, not container)
+docker-compose ps                     # Status
+docker-compose down                   # Stop & cleanup
 ```
 
-### Troubleshooting
+**Troubleshooting:**
 
-**Error: "no such service: sentinel-app"**
-
-- ❌ Wrong: `docker-compose logs sentinel-app`
-- ✅ Correct: `docker-compose logs sentinel`
-- Why: Service name is `sentinel`, container name is `sentinel-app`
-
-**Error: "REDIS_URL environment variable is required"**
-
-- Add to `.env`: `REDIS_URL=redis://localhost:6379` (local)
-- docker-compose automatically sets: `REDIS_URL=redis://redis:6379` (Docker)
+- Error "no such service: sentinel-app" → Use `sentinel` (service name), not `sentinel-app`
+- Env var error → Check `.env` file has all required variables
 
 ---
 
-## 2. Fly.io Deployment (FREE TIER - $0/month)
+## 2. Fly.io Deployment ($0/month)
 
-### What You Get Free
-
-- 3 shared-cpu-1x machines (256MB RAM each)
-- 160GB outbound data/month
-- 3 Redis instances
-- Global deployment
-- **No forced upgrade - free forever**
-
-### Initial Setup (One-Time)
+**One-Time Setup:**
 
 ```bash
-# Install Fly CLI (Windows)
+# Install CLI
 iwr https://fly.io/install.ps1 -useb | iex
 
-# Create account (free, no credit card required)
-fly auth signup
+# Login (creates free account)
+flyctl auth login
 
-# Login
-fly auth login
+# Set secrets
+flyctl secrets set GROQ_API_KEY=your_key
+flyctl secrets set HF_API_TOKEN=your_hf_token
 ```
 
-### Deploy
+**Deploy:**
 
 ```bash
-cd C:\Users\syeds\Desktop\Sentinel
-
-# Launch app (creates fly.toml if not exists)
-fly launch --no-deploy
-
-# Set environment variable
-fly secrets set GROQ_API_KEY=your_groq_api_key_here
-fly secrets set REDIS_URL=redis://localhost:6379  # Fly provides Redis
-
-# Deploy to free tier
-fly deploy --vm-size shared-cpu-1x
-
-# Check status
-fly status
-
-# View logs
-fly logs
-fly logs -n 100  # Last 100 lines
-
-# Open in browser
-fly open
+flyctl deploy                 # Builds & deploys
+flyctl status                 # Check health
+flyctl logs                   # View logs
+flyctl open                   # Open in browser
 ```
 
-### Fly.io Commands Reference
+**Free Tier Benefits:**
+
+- 3 machines (256MB each)
+- 160GB outbound data/month
+- 3 managed Redis instances
+- Global deployment
+- Auto-restart on crash
+- **$0/month forever** (no auto-upgrade)
+
+**Current Deployment:**
+
+- **URL:** https://sentinel-ai-gateway.fly.dev
+- **Status:** ✅ Running on free tier
+- **Cost:** $0/month
+- **Image:** 74MB (optimized for memory constraints)
+- **RAM:** 256MB sufficient (embedding API, not local model)
+
+---
+
+## 3. Environment Variables
+
+**Required:**
 
 ```bash
-# View app info
-fly info
-
-# Scale (within free tier: 3 machines max)
-fly scale count 2
-
-# View secrets
-fly secrets list
-
-# SSH into machine
-fly ssh console
-
-# Check resource usage
-fly dashboard
-
-# Stop app (keeps config, free)
-fly apps pause
-
-# Resume
-fly apps resume
-
-# Delete app
-fly apps destroy sentinel
+GROQ_API_KEY=gsk_...            # Groq LLM API key
+HF_API_TOKEN=hf_...             # HuggingFace embedding API token
+REDIS_URL=redis://redis:6379    # Redis (set automatically in Docker)
 ```
 
-### Cost Monitoring
+**Optional:**
 
 ```bash
-# View current usage
-fly dashboard
-
-# Expected: $0/month on free tier
-# Only charged if you manually scale beyond free tier limits
+LOG_LEVEL=INFO                  # DEBUG, INFO, WARNING, ERROR
+PORT=8000                       # Server port (default 8000)
 ```
 
 ---
 
-## 3. Alternative Free Options
-
-### Railway (Alternative)
-
-```bash
-# Install Railway CLI
-npm install -g @railway/cli
-
-# Login
-railway login
-
-# Deploy
-railway up
-
-# Set env vars
-railway variables set GROQ_API_KEY=your_key
-railway variables set REDIS_URL=redis://redis:6379
-```
-
-**Railway vs Fly.io:**
-
-- Railway: 1 machine, 1GB RAM
-- Fly.io: 3 machines, 256MB each
-- Both: $0/month unlimited
-
----
-
-## 4. Production Best Practices
-
-### Environment Variables
-
-```bash
-# Required
-GROQ_API_KEY=gsk_...          # Groq API key
-REDIS_URL=redis://redis:6379  # Redis connection
-
-# Optional
-LOG_LEVEL=INFO                # DEBUG, INFO, WARNING, ERROR
-```
-
-### Health Checks
+## 4. Health Checks
 
 ```bash
 # Local
-curl http://localhost:8001/health
+curl http://localhost:8000/health
+# Response: {"status": "healthy"}
 
 # Fly.io
-curl https://sentinel.fly.dev/health
+curl https://sentinel-ai-gateway.fly.dev/health
+# Auto-restarted if health check fails for 60s
+```
+
+---
+
+## 5. Monitoring & Debugging
+
+```bash
+flyctl logs                     # Real-time logs
+flyctl status                   # Machine & health status
+flyctl machines list            # List machines
+flyctl ssh console -m <id>      # SSH into machine
+```
+
+**Red Flags:**
+
+- `Out of memory` → Machine too small (unlikely on 256MB, but possible with old image)
+- `Failed to connect to Redis` → Check REDIS_URL env var
+- `Failed to load embedding model` → Check HF_API_TOKEN
+
+---
+
+## 6. Architecture (Current Production)
+
+```
+Client Application
+    ↓
+HTTPS → Fly.io (Sentinel FastAPI)
+    ├─→ Managed Redis (queries)
+    ├─→ HuggingFace API (embeddings)
+    ├─→ Groq API (LLM responses)
+    ↓
+Response + metadata
+```
+
+**Performance (Measured):**
+
+- Cache hit (exact): 5ms
+- Cache hit (semantic): 45ms
+- Cache miss: 1250ms total (1200ms Groq + 50ms HF embedding)
 
 # Expected response
+
 {"status":"healthy","version":"0.1.0"}
-```
+
+````
 
 ### Monitoring
 
@@ -217,7 +174,7 @@ curl http://localhost:8001/v1/metrics
   "stored_items": 25,
   "uptime_seconds": 3600
 }
-```
+````
 
 ---
 

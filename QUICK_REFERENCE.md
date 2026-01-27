@@ -1,53 +1,96 @@
-# QUICK REFERENCE - Docker Compose & Deployment
+# QUICK REFERENCE
 
-## Your Questions Answered
+## Common Commands
 
-### 1. Docker-compose logs error: "no such service: sentinel-app"
-
-**What went wrong:**
+### Docker Compose (Local Dev)
 
 ```bash
-docker-compose logs sentinel-app  # ❌ WRONG - uses container name
+docker-compose up -d              # Start all services
+docker-compose logs sentinel      # View logs (use SERVICE name, not container name)
+docker-compose ps                 # Check status
+docker-compose down               # Stop everything
 ```
 
-**Why:**
-In docker-compose.yml, the service is called `sentinel`, but the container is named `sentinel-app`.
-
-**Correct syntax:**
+### Fly.io Deployment (Cloud)
 
 ```bash
-docker-compose logs sentinel      # ✅ CORRECT - uses service name
-docker-compose logs sentinel --tail 50  # Last 50 lines
-docker-compose logs -f sentinel   # Follow live logs
+flyctl deploy                      # Deploy (rebuilds if needed)
+flyctl status                      # Check app health
+flyctl logs                        # View live logs
+flyctl secrets list                # List all environment variables
 ```
-
-**Key difference:**
-
-- `docker-compose` commands → use **service name** (`sentinel`)
-- `docker` commands → use **container name** (`sentinel-app`)
 
 ---
 
-### 2. Fly.io Free Tier - Can it be unlimited?
+## FAQ
 
-**SHORT ANSWER: Yes, $0/month unlimited**
+### Q: Docker error "no such service: sentinel-app"
 
-| Option               | Cost              | Duration      | Notes              |
-| -------------------- | ----------------- | ------------- | ------------------ |
-| **Fly.io Free Tier** | **$0**            | **Unlimited** | ✅ BEST CHOICE     |
-| Trial credit ($15)   | Free first 7 days | Then paid     | Not recommended    |
-| Railway              | $0                | Unlimited     | Alternative option |
+**A:** Use service name with `docker-compose`:
 
-**What Fly.io Free Includes:**
+- ✅ `docker-compose logs sentinel` (correct - service name)
+- ❌ `docker-compose logs sentinel-app` (wrong - that's container name)
 
-- 3 shared-cpu-1x machines (256MB RAM each)
-- 160GB outbound data/month
-- 3 free Redis instances ✅ (perfect for Sentinel)
-- Global deployment to 38 regions
-- Custom domain support
-- **No auto-downgrade to paid** - stays free forever
+### Q: Can Fly.io be free forever?
 
-**Deployment:**
+**A:** Yes! Free tier = **$0/month unlimited**:
+
+- 3 machines (256MB each)
+- 160GB outbound/month
+- 3 Redis instances
+- No forced upgrade - stays free forever
+
+### Q: Fly.io deployment keeps restarting
+
+**A:** Check:
+
+1. `flyctl logs` for errors (usually missing env vars or startup failures)
+2. `flyctl secrets list` - verify all secrets are "Deployed" status
+3. `flyctl machines restart <id>` - force restart after fixing issues
+
+### Q: How do I configure the embedding API?
+
+**A:** Set environment variables:
+
+```bash
+HF_API_TOKEN=hf_your_token_here    # HuggingFace Inference API token
+REDIS_URL=...                       # Redis connection string
+GROQ_API_KEY=...                    # Groq API key
+```
+
+---
+
+## Architecture Quick View
+
+```
+Client App
+    ↓
+  Sentinel (FastAPI)
+    ├─→ Check Redis cache (semantic match?)
+    ├─→ Call HF Inference API (embeddings)
+    ├─→ Call Groq API (LLM responses)
+    ↓
+  Return response + metadata
+```
+
+**Key metrics:**
+
+- Cache hit (exact): 5ms
+- Cache hit (semantic): 45ms
+- Cache miss: 1200ms + embedding latency
+
+---
+
+## Deployment Summary
+
+| Aspect       | Local          | Fly.io                              |
+| ------------ | -------------- | ----------------------------------- |
+| **Service**  | docker-compose | Free tier                           |
+| **Cost**     | $0             | $0/month                            |
+| **RAM**      | Varies         | 256MB ✓                             |
+| **Database** | Local Redis    | Managed Redis ✓                     |
+| **URL**      | localhost:8000 | https://sentinel-ai-gateway.fly.dev |
+| **Uptime**   | Manual         | Auto-restart                        |
 
 ```bash
 fly deploy --vm-size shared-cpu-1x  # Deploys to free tier

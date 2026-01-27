@@ -23,13 +23,13 @@ Sentinel is a **semantic AI gateway** that sits between your application and LLM
 
 ## 🎯 **Key Features**
 
-| Feature              | Description                                                           |
-| -------------------- | --------------------------------------------------------------------- |
-| **Semantic Caching** | Uses sentence transformers (384D embeddings) to match similar queries |
-| **Multi-Provider**   | Support for Groq (default), OpenAI, and extensible architecture       |
-| **Production-Ready** | Docker, async I/O, error handling, logging, metrics                   |
-| **Fast**             | Redis-backed cache with connection pooling, instant startup           |
-| **Configurable**     | Similarity thresholds, TTL, model selection                           |
+| Feature              | Description                                                     |
+| -------------------- | --------------------------------------------------------------- |
+| **Semantic Caching** | HuggingFace Inference API (all-MiniLM-L6-v2, 384D embeddings)   |
+| **Multi-Provider**   | Support for Groq (default), OpenAI, and extensible architecture |
+| **Production-Ready** | 74MB Docker image, async I/O, error handling, logging, metrics  |
+| **Fast**             | Redis-backed cache, instant startup (<1s), no model downloads   |
+| **Configurable**     | Similarity thresholds, TTL, embedding provider selection        |
 
 ---
 
@@ -38,14 +38,20 @@ Sentinel is a **semantic AI gateway** that sits between your application and LLM
 ```
 User Query → Sentinel
               ↓
-         [1] Compute embedding (BERT)
+         [1] Compute embedding (HF API)
               ↓
          [2] Check exact cache match? → ✅ Return (5ms)
               ↓ No
          [3] Check semantic match? → ✅ Return (50ms)
               ↓ No
-         [4] Call LLM API → Cache result → Return (1200ms)
+         [4] Call LLM API → Cache result → Return (1250ms)
 ```
+
+**Key optimization:** Embedding computation via external API means:
+
+- 256MB RAM sufficient (no local model)
+- <1s startup (no model download)
+- Instant horizontal scaling (stateless)
 
 **Example:**
 
@@ -61,10 +67,10 @@ User Query → Sentinel
 
 - **FastAPI** 0.104 - Async web framework
 - **Redis** 7.0 - Distributed cache
-- **Transformers** - sentence-transformers/all-MiniLM-L6-v2 (384D embeddings)
-- **aiohttp** - Async HTTP client for LLM providers
+- **HuggingFace Inference API** - Embeddings (external, no local model)
+- **aiohttp** - Async HTTP client for embeddings & LLM providers
 - **Pydantic** - Request/response validation
-- **Docker** - Containerization
+- **Docker** - Minimal 74MB image, multi-stage build
 
 ---
 
