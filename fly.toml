@@ -1,64 +1,56 @@
-# Fly.io deployment configuration for Sentinel
-# Deploy with: fly deploy
+# fly.toml app configuration file generated for sentinel-ai-gateway on 2026-01-28T02:02:53+05:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "sentinel-ai-gateway"
-primary_region = "ord"  # Chicago - change to nearest region
+app = 'sentinel-ai-gateway'
+primary_region = 'bom'
 
 [build]
-  # Use Dockerfile for building
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  # Environment variables (non-secret)
-  REDIS_URL = "redis://localhost:6379"
-  PORT = "8001"
+  PORT = '8000'
 
 [http_service]
-  internal_port = 8001
+  internal_port = 8000
   force_https = true
-  auto_stop_machines = true
+  auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0  # Scale to zero when idle (FREE!)
-  processes = ["app"]
+  min_machines_running = 0
+  processes = ['app']
 
   [[http_service.checks]]
-    grace_period = "30s"
-    interval = "15s"
-    method = "GET"
-    timeout = "5s"
-    path = "/health"
+    interval = '15s'
+    timeout = '5s'
+    grace_period = '30s'
+    method = 'GET'
+    path = '/health'
 
 [[services]]
-  protocol = "tcp"
-  internal_port = 8001
+  protocol = 'tcp'
+  internal_port = 8000
 
   [[services.ports]]
     port = 80
-    handlers = ["http"]
+    handlers = ['http']
     force_https = true
 
   [[services.ports]]
     port = 443
-    handlers = ["tls", "http"]
+    handlers = ['tls', 'http']
 
   [services.concurrency]
-    type = "connections"
+    type = 'connections'
     hard_limit = 25
     soft_limit = 20
 
   [[services.tcp_checks]]
-    interval = "15s"
-    timeout = "2s"
-    grace_period = "30s"
+    interval = '15s'
+    timeout = '2s'
+    grace_period = '30s'
 
-# VM configuration (free tier)
 [[vm]]
-  cpu_kind = "shared"
+  memory = '256mb'
   cpus = 1
   memory_mb = 256
-
-# Redis (Upstash free tier or Fly.io Redis)
-# Uncomment if using Fly Redis:
-# [[services]]
-#   protocol = "tcp"
-#   internal_port = 6379
