@@ -4,6 +4,7 @@ Persistent, multi-process cache using Redis.
 """
 
 import logging
+import os
 from typing import Optional
 import redis.asyncio as redis
 import json
@@ -25,7 +26,7 @@ class RedisCache:
     
     def __init__(
         self,
-        redis_url: str = "redis://localhost:6379",
+        redis_url: str | None = None,
         ttl_seconds: int = 3600,
         key_prefix: str = "sentinel:cache:",
     ) -> None:
@@ -37,7 +38,8 @@ class RedisCache:
             ttl_seconds: Time-to-live for cached entries (default: 1 hour)
             key_prefix: Prefix for all keys to avoid collisions (default: "sentinel:cache:")
         """
-        self.redis_url = redis_url
+        # Prefer explicit argument, otherwise read from environment, fallback to localhost
+        self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379")
         self.ttl_seconds = ttl_seconds
         self.key_prefix = key_prefix
         self.client: Optional[redis.Redis] = None

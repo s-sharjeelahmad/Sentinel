@@ -43,7 +43,7 @@ app = FastAPI(
 
 # Global cache instance (will be initialized on startup)
 cache = RedisCache(
-    redis_url="redis://localhost:6379",
+    redis_url=None,  # Use REDIS_URL env when not provided
     ttl_seconds=3600,  # 1 hour TTL
     key_prefix="sentinel:cache:",
 )
