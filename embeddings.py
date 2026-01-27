@@ -1,9 +1,13 @@
 """
 Sentinel Embeddings Module
 Convert text to semantic embeddings for similarity comparison.
+
+Uses Hugging Face Inference API (external, no local model needed).
 """
 
 import logging
+import os
+import aiohttp
 from typing import Optional
 import numpy as np
 
@@ -12,47 +16,48 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingModel:
     """
-    Wrapper for transformers-based embedding model.
+    Wrapper for Hugging Face Inference API embeddings.
     
     Purpose:
-    - Convert prompts to embedding vectors
+    - Convert prompts to embedding vectors via API
     - Compare embeddings via cosine similarity
     - Support semantic caching (find similar cached responses)
     
-    Model Choice:
-    - "sentence-transformers/all-MiniLM-L6-v2" via HF transformers
-    - 384 dimensions, ~60MB, fast (on CPU)
-    - Accuracy: Good for general Q&A
-    - Tradeoff: Speed vs accuracy (could use larger models if needed)
+    Advantages:
+    - No local model storage (saves 90MB)
+    - Instant startup (no model download)
+    - Works on 256MB Fly.io machine
+    - Free tier available (HuggingFace account)
     """
     
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         """
-        Initialize embedding model.
+        Initialize Hugging Face Inference API embeddings.
         
         Args:
-            model_name: Hugging Face model identifier
+            model_name: HF model identifier (using API endpoint)
         """
         self.model_name = model_name
-        self.model = None
-        self.tokenizer = None
-        self.embedding_dim = 384  # Dimension of embeddings from all-MiniLM-L6-v2
+        self.api_token = os.getenv("HF_API_TOKEN")
+        if not self.api_token:
+            raise ValueError("HF_API_TOKEN environment variable required for embeddings API")
+        
+        self.api_url = f"https://api-inference.huggingface.co/models/{model_name}"
+        self.embedding_dim = 384  # all-MiniLM-L6-v2 dimension
+        self.session: Optional[aiohttp.ClientSession] = None
     
-    def load(self) -> None:
-        """Load model and tokenizer from disk or download first time."""
+    async def load(self) -> None:
+        """Initialize async session."""
         try:
-            from transformers import AutoModel, AutoTokenizer
-            logger.info(f"Loading embedding model: {self.model_name}")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModel.from_pretrained(self.model_name)
-            logger.info(f"✅ Embedding model loaded ({self.embedding_dim} dimensions)")
+            self.session = aiohttp.ClientSession()
+            logger.info(f"✅ Embedding model configured (HF API: {self.model_name})")
         except Exception as e:
-            logger.error(f"❌ Failed to load embedding model: {e}")
+            logger.error(f"❌ Failed to configure embedding model: {e}")
             raise
     
-    def embed(self, text: str) -> np.ndarray:
+    async def embed(self, text: str) -> np.ndarray:
         """
-        Convert text to embedding vector.
+        Convert text to embedding vector via HF Inference API.
         
         Args:
             text: The text to embed (prompt or cached response)
@@ -61,26 +66,38 @@ class EmbeddingModel:
             numpy array of shape (384,) for all-MiniLM-L6-v2
             
         Example:
-            embedding = model.embed("What is machine learning?")
+            embedding = await model.embed("What is machine learning?")
             # embedding.shape = (384,)
         """
-        if not self.model or not self.tokenizer:
+        if not self.session:
             raise RuntimeError("Model not loaded. Call load() first.")
         
         try:
-            import torch
-            # Tokenize
-            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
-            # Compute embeddings (mean pooling of token embeddings)
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                # Mean pooling: average all token embeddings
-                embeddings = outputs.last_hidden_state.mean(dim=1)
+            headers = {"Authorization": f"Bearer {self.api_token}"}
+            payload = {"inputs": text}
             
-            return embeddings[0].numpy()
+            async with self.session.post(self.api_url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise Exception(f"API error {resp.status}: {error_text}")
+                
+                result = await resp.json()
+                
+            # API returns list of embeddings (one per input)
+            if isinstance(result, list) and len(result) > 0:
+                embedding = np.array(result[0], dtype=np.float32)
+            else:
+                raise ValueError(f"Unexpected API response: {result}")
+            
+            return embedding
         except Exception as e:
             logger.error(f"Error embedding text: {e}")
             raise
+    
+    async def close(self) -> None:
+        """Close async session."""
+        if self.session:
+            await self.session.close()
     
     def cosine_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
         """
@@ -100,8 +117,8 @@ class EmbeddingModel:
             Cosine similarity score (0.0 to 1.0 in practice)
             
         Example:
-            emb1 = model.embed("What is AI?")
-            emb2 = model.embed("Tell me about AI")
+            emb1 = await model.embed("What is AI?")
+            emb2 = await model.embed("Tell me about AI")
             score = model.cosine_similarity(emb1, emb2)
             # score ≈ 0.95 (very similar!)
         """

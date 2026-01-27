@@ -29,15 +29,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir torch>=2.0.0 --index-url https://download.pytorch.org/whl/${TORCH_VARIANT}
 
 # Install remaining dependencies
-# Note: Using redis (pure Python) instead of redis[hiredis]
-# Tradeoff: +0.5ms per request, but 4min faster builds
-# For >100k req/day, add [hiredis] to requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Cache embedding model at build time (eliminates 90s runtime download delay)
-# Downloads ~90MB model once during image build, reused at runtime
-RUN python -c "from sentence_transformers import SentenceTransformer; \
-    SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
 # Stage 2: Runtime - Minimal production image
 FROM python:3.11-slim

@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
     # Startup
     try:
         await cache.connect()
-        embedding_model.load()
+        await embedding_model.load()
         await initialize_llm_provider()
         logger.info("🚀 Sentinel started successfully")
     except Exception as e:
@@ -60,6 +60,7 @@ async def lifespan(app: FastAPI):
     yield  # Application runs here
     
     # Shutdown
+    await embedding_model.close()
     await cleanup_llm_provider()
     await cache.disconnect()
     logger.info("👋 Sentinel shut down gracefully")
