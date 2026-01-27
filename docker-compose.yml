@@ -1,0 +1,53 @@
+# Docker Compose for local development and testing
+# Runs Sentinel + Redis together
+
+version: '3.8'
+
+services:
+  # Redis cache service
+  redis:
+    image: redis:7-alpine
+    container_name: sentinel-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Sentinel API service
+  sentinel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinel-app
+    ports:
+      - "8001:8001"
+    environment:
+      # Override Redis connection for Docker network
+      REDIS_URL: redis://redis:6379
+      # Load Groq API key from .env file
+      GROQ_API_KEY: ${GROQ_API_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    volumes:
+      # Mount code for development (hot reload)
+      # Comment out for production
+      - .:/app
+
+volumes:
+  redis_data:
+    driver: local

@@ -1,0 +1,64 @@
+# Fly.io deployment configuration for Sentinel
+# Deploy with: fly deploy
+
+app = "sentinel-ai-gateway"
+primary_region = "ord"  # Chicago - change to nearest region
+
+[build]
+  # Use Dockerfile for building
+  dockerfile = "Dockerfile"
+
+[env]
+  # Environment variables (non-secret)
+  REDIS_URL = "redis://localhost:6379"
+  PORT = "8001"
+
+[http_service]
+  internal_port = 8001
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0  # Scale to zero when idle (FREE!)
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8001
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "30s"
+
+# VM configuration (free tier)
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
+
+# Redis (Upstash free tier or Fly.io Redis)
+# Uncomment if using Fly Redis:
+# [[services]]
+#   protocol = "tcp"
+#   internal_port = 6379
