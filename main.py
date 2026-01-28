@@ -19,6 +19,7 @@ from embeddings import embedding_model
 from models import QueryRequest, QueryResponse, HealthResponse, MetricsResponse
 import llm_provider
 from llm_provider import initialize_llm_provider, cleanup_llm_provider
+from query_service import QueryService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,14 +27,30 @@ logger = logging.getLogger(__name__)
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 cache = RedisCache(redis_url=None, ttl_seconds=3600, key_prefix="sentinel:cache:")
 
+# Service layer instance - initialized during startup with injected dependencies
+# Why global? Service is stateless, shared across all requests (same as cache, embedding_model)
+# Alternative: FastAPI Depends() for request-scoped injection - overkill for stateless service
+query_service: QueryService = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: Initialize cache and LLM. Shutdown: Cleanup resources."""
+    global query_service
+    
     try:
         await cache.connect()
         await embedding_model.load()
         await initialize_llm_provider()
+        
+        # Initialize service layer with dependencies (Dependency Injection pattern)
+        # Service doesn't create its own dependencies - they're passed in
+        # Why? Testability: can inject mocks. Flexibility: can swap implementations.
+        query_service = QueryService(
+            cache=cache,
+            embedding_model=embedding_model,
+            llm_provider=llm_provider.llm_provider
+        )
         
         logger.info("Sentinel started")
         if DEBUG_MODE:
@@ -92,94 +109,38 @@ async def health_check() -> HealthResponse:
 
 @app.post("/v1/query", response_model=QueryResponse, tags=["cache"])
 async def query(request: QueryRequest) -> QueryResponse:
-    """Submit prompt with semantic caching. Returns cached response if similarity >= threshold."""
-    prompt = request.prompt
-    threshold = request.similarity_threshold
-    start_time = time.perf_counter()
-
-    try:
-        query_embedding = await embedding_model.embed(prompt)
-    except Exception as e:
-        logger.error(f"Embedding error: {e}")
-        query_embedding = None
-
-    cached_response, is_hit = await cache.get(prompt)
-    if is_hit:
-        latency_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Cache HIT (exact): similarity=1.00 | latency={latency_ms:.1f}ms")
-        return QueryResponse(
-            response=cached_response or "",
-            cache_hit=True,
-            similarity_score=1.0,
-            matched_prompt=prompt or "",
-            provider=request.provider,
-            model=request.model,
-            tokens_used=0,
-            latency_ms=latency_ms
-        )
-
-    semantic_hit = None
-    if query_embedding is not None:
-        cached_items = await cache.get_all_cached()
-        semantic_hit = embedding_model.find_similar(query_embedding, cached_items, threshold)
-
-    if semantic_hit:
-        latency_ms = (time.perf_counter() - start_time) * 1000
-        similarity = semantic_hit["similarity"]
-        logger.info(f"Cache HIT (semantic): similarity={similarity:.2f} | latency={latency_ms:.1f}ms")
-        return QueryResponse(
-            response=semantic_hit["response"],
-            cache_hit=True,
-            similarity_score=similarity,
-            matched_prompt=semantic_hit["prompt"],
-            provider=request.provider,
-            model=request.model,
-            tokens_used=0,
-            latency_ms=latency_ms
-        )
-
-    try:
-        logger.info(f"Cache MISS: calling LLM")
-        
-        llm_result = await llm_provider.llm_provider.call(
-            prompt=prompt,
-            model=request.model,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens
-        )
-        
-        llm_response = llm_result["response"]
-        cost_usd = llm_result["cost_usd"]
-        latency_ms = (time.perf_counter() - start_time) * 1000
-        tokens_used = llm_result["tokens_used"]
-        
-        await cache.set(prompt, llm_response, query_embedding)
-        logger.info(f"LLM call: latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
-        
-        return QueryResponse(
-            response=llm_response,
-            cache_hit=False,
-            similarity_score=None,
-            matched_prompt=None,
-            provider="groq",
-            model=request.model,
-            tokens_used=tokens_used,
-            latency_ms=latency_ms
-        )
+    """
+    Submit prompt with semantic caching. Returns cached response if similarity >= threshold.
     
-    except Exception as e:
-        logger.error(f"LLM call failed: {e}")
-        latency_ms = (time.perf_counter() - start_time) * 1000
-        return QueryResponse(
-            response=f"Error: {str(e)}",
-            cache_hit=False,
-            similarity_score=None,
-            matched_prompt=None,
-            provider="error",
-            model=request.model,
-            tokens_used=0,
-            latency_ms=latency_ms
-        )
+    API LAYER RESPONSIBILITY (Thin Controller Pattern):
+        - Request validation (Pydantic does this automatically via QueryRequest)
+        - Route to appropriate service (query_service.execute_query)
+        - Return response (FastAPI serializes QueryResponse to JSON)
+    
+    WHAT MOVED OUT:
+        - All orchestration logic → QueryService.execute_query()
+        - Cache lookup logic → stays in cache layer (RedisCache)
+        - LLM call logic → stays in provider layer (GroqProvider)
+    
+    WHY THIS IS BETTER:
+        - Endpoint is now 10 lines instead of 80
+        - Business logic testable without HTTP server
+        - Service reusable (could add CLI, gRPC, webhook, etc.)
+        - Clear separation: HTTP vs business logic
+    
+    BACKEND PRINCIPLE: Thin Controllers
+        Controllers should delegate, not implement.
+        "Don't put business logic in controllers" - every backend style guide.
+    
+    INTERVIEW QUESTION:
+        "What if we need to add gRPC support alongside REST?"
+        Answer: "Create grpc_handler.py that calls same QueryService. Zero duplication."
+    
+    TESTABILITY:
+        Before: Must mock FastAPI, HTTP requests, async context.
+        After: Just test QueryService with mock dependencies.
+    """
+    return await query_service.execute_query(request)
 
 
 @app.get("/v1/metrics", response_model=MetricsResponse, tags=["monitoring"])

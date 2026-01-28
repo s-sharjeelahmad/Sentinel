@@ -32,7 +32,7 @@ class EmbeddingModel:
             raise
     
     async def embed(self, text: str) -> np.ndarray:
-        """Convert text to embedding vector.
+        """Convert text to embedding vector."""
         if not self.session:
             raise RuntimeError("Model not loaded. Call load() first.")
         

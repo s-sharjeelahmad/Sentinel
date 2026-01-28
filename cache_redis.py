@@ -72,6 +72,8 @@ class RedisCache:
                 embedding_key = f"{key}:embedding"
                 embedding_json = json.dumps(embedding.tolist())
                 await self.client.setex(embedding_key, self.ttl_seconds, embedding_json)
+        except Exception as e:
+            logger.error(f"Redis SET error: {e}")
     
     async def get_all_cached(self) -> list[dict]:
         """Retrieve all cached prompts with responses and embeddings for semantic search."""
