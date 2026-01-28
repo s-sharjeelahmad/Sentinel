@@ -6,7 +6,6 @@ import logging
 import time
 import asyncio
 import os
-import signal
 from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -93,7 +92,7 @@ async def lifespan(app: FastAPI):
             logger.warning("DEBUG MODE ENABLED - Debug endpoints exposed")
         else:
             logger.info("Debug endpoints disabled")
-    except Exception as e:
+    except (OSError, ConnectionError, ValueError) as e:
         logger.error(f"Startup failed: {e}")
         raise
     
@@ -215,85 +214,13 @@ async def health_check() -> HealthResponse:
 
 @app.post("/v1/query", response_model=QueryResponse, tags=["cache"])
 async def query(request: QueryRequest) -> QueryResponse:
-    """
-    Submit prompt with semantic caching. Returns cached response if similarity >= threshold.
-    
-    API LAYER RESPONSIBILITY (Thin Controller Pattern):
-        - Request validation (Pydantic does this automatically via QueryRequest)
-        - Route to appropriate service (query_service.execute_query)
-        - Return response (FastAPI serializes QueryResponse to JSON)
-    
-    WHAT MOVED OUT:
-        - All orchestration logic → QueryService.execute_query()
-        - Cache lookup logic → stays in cache layer (RedisCache)
-        - LLM call logic → stays in provider layer (GroqProvider)
-    
-    WHY THIS IS BETTER:
-        - Endpoint is now 10 lines instead of 80
-        - Business logic testable without HTTP server
-        - Service reusable (could add CLI, gRPC, webhook, etc.)
-        - Clear separation: HTTP vs business logic
-    
-    BACKEND PRINCIPLE: Thin Controllers
-        Controllers should delegate, not implement.
-        "Don't put business logic in controllers" - every backend style guide.
-    
-    INTERVIEW QUESTION:
-        "What if we need to add gRPC support alongside REST?"
-        Answer: "Create grpc_handler.py that calls same QueryService. Zero duplication."
-    
-    TESTABILITY:
-        Before: Must mock FastAPI, HTTP requests, async context.
-        After: Just test QueryService with mock dependencies.
-    """
+    """Submit prompt with semantic caching. Returns cached response if similarity >= threshold."""
     return await query_service.execute_query(request)
 
 
 @app.get("/metrics", tags=["monitoring"])
 async def prometheus_metrics() -> Response:
-    """
-    Prometheus metrics endpoint.
-    
-    PHASE 4: Exposes metrics in Prometheus text format for scraping.
-    
-    Why /metrics?
-    - Standard endpoint name (Prometheus convention)
-    - Pull-based: Prometheus scrapes this endpoint periodically
-    - Alternative: Push to Pushgateway (for batch jobs, not services)
-    
-    Format:
-    - Plain text (not JSON)
-    - HELP lines describe metrics
-    - TYPE lines specify metric type (counter, histogram, gauge)
-    - Actual metric lines with labels and values
-    
-    Example output:
-        # HELP sentinel_requests_total Total HTTP requests to Sentinel API
-        # TYPE sentinel_requests_total counter
-        sentinel_requests_total{endpoint="/v1/query",status="200"} 42.0
-        sentinel_requests_total{endpoint="/v1/query",status="401"} 3.0
-    
-    Access control:
-    - Public endpoint (no auth required)
-    - Standard practice: Metrics exposed to monitoring system
-    - If sensitive: Add firewall rules to restrict to Prometheus IP
-    
-    Interview question: "Should metrics be authenticated?"
-    Answer: "Depends. Aggregate metrics (counts, latencies) usually public.
-    If metrics contain PII or business secrets, auth required. Sentinel metrics
-    are aggregate only, safe to expose."
-    
-    Testing:
-        curl http://localhost:8000/metrics
-    
-    Prometheus config:
-        scrape_configs:
-          - job_name: 'sentinel'
-            static_configs:
-              - targets: ['localhost:8000']
-    """
-    # Generate Prometheus text format from REGISTRY
-    # REGISTRY automatically collects all metrics defined in metrics.py
+    """Prometheus metrics endpoint (text format, Prometheus scraping standard)."""
     return Response(
         content=generate_latest(metrics.REGISTRY),
         media_type=CONTENT_TYPE_LATEST
@@ -354,7 +281,7 @@ if DEBUG_MODE:
                 "total_cached": len(all_cached),
                 "embeddings_stored": embeddings_count,
             }
-        except Exception as e:
+        except (OSError, ConnectionError, ValueError) as e:
             logger.error(f"Error getting cached items: {e}")
             return {"error": str(e)}
 
@@ -389,7 +316,7 @@ if DEBUG_MODE:
             
             logger.info(f"Cache cleared: {deleted_count} keys deleted")
             return {"status": "success", "deleted_keys": deleted_count}
-        except Exception as e:
+        except (OSError, ConnectionError, RuntimeError) as e:
             logger.error(f"Error clearing cache: {e}")
             return {"error": str(e)}
 
@@ -429,7 +356,7 @@ if DEBUG_MODE:
                 "cached_items": len(all_cached),
                 "similarity_scores": similarity_scores,
             }
-        except Exception as e:
+        except (ValueError, OSError, RuntimeError) as e:
             logger.error(f"Error in embedding test: {e}")
             return {"error": str(e)}
 

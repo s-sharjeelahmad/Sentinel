@@ -39,7 +39,7 @@ class RedisCache:
                     await self.client.ping()
                 logger.info(f"Connected to Redis")
                 return
-            except Exception as e:
+            except (OSError, ConnectionError, RuntimeError) as e:
                 logger.warning(f"Redis connection attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(backoff_sec)
@@ -67,7 +67,7 @@ class RedisCache:
                 return response, True
             self._misses += 1
             return None, False
-        except Exception as e:
+        except (OSError, ConnectionError, RuntimeError) as e:
             logger.error(f"Redis GET error: {e}")
             self._misses += 1
             return None, False
@@ -85,7 +85,7 @@ class RedisCache:
                 embedding_key = f"{key}:embedding"
                 embedding_json = json.dumps(embedding.tolist())
                 await self.client.setex(embedding_key, self.ttl_seconds, embedding_json)
-        except Exception as e:
+        except (OSError, ConnectionError, RuntimeError) as e:
             logger.error(f"Redis SET error: {e}")
     
     async def get_all_cached(self) -> list[dict]:

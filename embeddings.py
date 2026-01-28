@@ -27,7 +27,7 @@ class EmbeddingModel:
         try:
             self.session = aiohttp.ClientSession()
             logger.info(f"✅ Embedding model configured (Jina: {self.model_name})")
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             logger.error(f"❌ Failed to configure embedding model: {e}")
             raise
     
@@ -61,7 +61,7 @@ class EmbeddingModel:
                 raise ValueError(f"Unexpected API response format: {result}")
             
             return embedding
-        except Exception as e:
+        except (ValueError, KeyError, OSError, asyncio.TimeoutError) as e:
             logger.error(f"Error embedding text: {e}")
             raise
     
