@@ -6,10 +6,61 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
+from enum import Enum
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+
+class CircuitBreakerState(Enum):
+    """Circuit breaker state machine."""
+    CLOSED = "closed"          # Normal operation
+    OPEN = "open"              # Failing - reject all requests
+    HALF_OPEN = "half_open"    # Testing - allow 1 request
+
+
+class CircuitBreaker:
+    """Simple circuit breaker for LLM API calls."""
+    
+    def __init__(self, failure_threshold: int = 5, cooldown_sec: int = 60):
+        """Initialize circuit breaker."""
+        self.failure_threshold = failure_threshold
+        self.cooldown_sec = cooldown_sec
+        self.state = CircuitBreakerState.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = None
+    
+    async def call(self, coro):
+        """Execute coroutine with circuit breaker protection."""
+        if self.state == CircuitBreakerState.OPEN:
+            # Check if cooldown period has elapsed
+            if time.time() - self.last_failure_time > self.cooldown_sec:
+                self.state = CircuitBreakerState.HALF_OPEN
+                logger.info("Circuit breaker: HALF_OPEN - attempting recovery")
+            else:
+                raise RuntimeError("Circuit breaker OPEN - LLM API unavailable")
+        
+        try:
+            result = await coro
+            
+            # Success - close circuit
+            if self.state == CircuitBreakerState.HALF_OPEN:
+                self.state = CircuitBreakerState.CLOSED
+                self.failure_count = 0
+                logger.info("Circuit breaker: CLOSED - recovered")
+            
+            return result
+        
+        except Exception as e:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            
+            if self.failure_count >= self.failure_threshold:
+                self.state = CircuitBreakerState.OPEN
+                logger.error(f"Circuit breaker: OPEN - {self.failure_count} consecutive failures")
+            
+            raise
 
 
 class LLMProvider(ABC):
@@ -29,16 +80,17 @@ class GroqProvider(LLMProvider):
     OUTPUT_COST_PER_1K_TOKENS = 0.00015
     MAX_RETRIES = 3
     INITIAL_BACKOFF_SEC = 1.0
-    REQUEST_TIMEOUT_SEC = 10.0
+    REQUEST_TIMEOUT_SEC = 30.0  # Phase 5: Increased to 30s (from 10s) to avoid timeout on slow requests
     POOL_TIMEOUT_SEC = 30.0
     
     def __init__(self):
-        """Initialize Groq provider with API key from environment."""
+        """Initialize Groq provider with API key from environment and circuit breaker."""
         self.api_key = os.getenv("GROQ_API_KEY")
         if not self.api_key:
             logger.warning("GROQ_API_KEY not set. Get key from https://console.groq.com")
         
         self.session: Optional[aiohttp.ClientSession] = None
+        self.circuit_breaker = CircuitBreaker(failure_threshold=5, cooldown_sec=60)  # Phase 5: Circuit breaker
         logger.info("GroqProvider initialized")
     
     async def connect(self):
@@ -54,12 +106,20 @@ class GroqProvider(LLMProvider):
             logger.info("Groq connection pool closed")
     
     async def call(self, prompt: str, model: str = "llama-3.1-8b-instant", temperature: float = 0.7, max_tokens: int = 500) -> Dict[str, Any]:
-        """Call Groq API with exponential backoff retry logic for rate limiting."""
+        """Call Groq API with exponential backoff retry logic and circuit breaker protection."""
         if not self.api_key:
             raise RuntimeError("GROQ_API_KEY not set. export GROQ_API_KEY=your_key")
         
         if self.session is None:
             await self.connect()
+        
+        # Phase 5: Wrap with circuit breaker - fail fast if LLM is known to be broken
+        return await self.circuit_breaker.call(
+            self._call_with_retries(prompt=prompt, model=model, temperature=temperature, max_tokens=max_tokens)
+        )
+    
+    async def _call_with_retries(self, prompt: str, model: str, temperature: float, max_tokens: int) -> Dict[str, Any]:
+        """Call Groq API with exponential backoff retry logic."""
         
         start_time = time.perf_counter()
         backoff_sec = self.INITIAL_BACKOFF_SEC

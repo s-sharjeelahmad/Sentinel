@@ -3,6 +3,7 @@
 import logging
 import os
 import hashlib
+import asyncio
 from typing import Optional
 import redis.asyncio as redis
 import json
@@ -27,15 +28,25 @@ class RedisCache:
         self._misses = 0
     
     async def connect(self) -> None:
-        """Establish Redis connection."""
-        try:
-            self.client = await redis.from_url(self.redis_url, encoding="utf-8", decode_responses=True)
-            if self.client:
-                await self.client.ping()
-            logger.info(f"Connected to Redis")
-        except Exception as e:
-            logger.error(f"Redis connection failed: {e}")
-            raise
+        """Establish Redis connection with exponential backoff retry logic."""
+        max_retries = 3
+        backoff_sec = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                self.client = await redis.from_url(self.redis_url, encoding="utf-8", decode_responses=True)
+                if self.client:
+                    await self.client.ping()
+                logger.info(f"Connected to Redis")
+                return
+            except Exception as e:
+                logger.warning(f"Redis connection attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(backoff_sec)
+                    backoff_sec *= 2
+                else:
+                    logger.error(f"Redis connection failed after {max_retries} attempts")
+                    raise
     
     
     def _make_key(self, prompt: str) -> str:

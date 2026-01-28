@@ -6,7 +6,9 @@ import logging
 import time
 import asyncio
 import os
+import signal
 from datetime import datetime
+from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -44,11 +46,19 @@ query_service: QueryService = None
 rate_limiter: TokenBucketRateLimiter = None
 auth: APIKeyAuth = None
 
+# Phase 5: Track active requests for graceful shutdown
+active_requests = 0
+shutdown_event: Optional[asyncio.Event] = None
+shutdown_timeout_sec = 10
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: Initialize cache and LLM. Shutdown: Cleanup resources."""
-    global query_service, rate_limiter, auth
+    """Startup: Initialize cache and LLM. Shutdown: Cleanup resources gracefully."""
+    global query_service, rate_limiter, auth, shutdown_event
+    
+    # Phase 5: Initialize shutdown event for this async context
+    shutdown_event = asyncio.Event()
     
     try:
         await cache.connect()
@@ -89,6 +99,20 @@ async def lifespan(app: FastAPI):
     
     yield
     
+    # Phase 5: Graceful shutdown - stop accepting requests and drain active connections
+    logger.info("Shutting down gracefully...")
+    if shutdown_event:
+        shutdown_event.set()
+    
+    # Wait for active requests to complete (with timeout)
+    start_shutdown = time.time()
+    while active_requests > 0 and time.time() - start_shutdown < shutdown_timeout_sec:
+        logger.info(f"Waiting for {active_requests} active request(s) to complete...")
+        await asyncio.sleep(0.1)
+    
+    if active_requests > 0:
+        logger.warning(f"Shutdown timeout: {active_requests} request(s) still active after {shutdown_timeout_sec}s")
+    
     await embedding_model.close()
     await cleanup_llm_provider()
     await cache.disconnect()
@@ -111,13 +135,28 @@ async def log_requests(request: Request, call_next):
     PHASE 4: Also records Prometheus metrics for every request.
     - Increments request counter with endpoint and status labels
     - Records latency histogram
+    
+    PHASE 5: Track active requests for graceful shutdown.
+    - Reject new requests if shutdown is in progress
+    - Decrement counter when request completes
     """
+    global active_requests
+    
+    # Phase 5: Check if shutdown in progress - reject new requests
+    if shutdown_event and shutdown_event.is_set():
+        logger.warning(f"Rejecting request during shutdown: {request.method} {request.url.path}")
+        return JSONResponse(status_code=503, content={"error": "server_shutting_down"})
+    
+    active_requests += 1
     start_time = time.time()
     endpoint = request.url.path
     
     logger.info(f"→ {request.method} {endpoint}")
     
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    finally:
+        active_requests -= 1
     
     latency_ms = (time.time() - start_time) * 1000
     latency_seconds = latency_ms / 1000
