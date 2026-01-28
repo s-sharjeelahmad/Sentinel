@@ -2,6 +2,7 @@
 
 import logging
 import os
+import hashlib
 from typing import Optional
 import redis.asyncio as redis
 import json
@@ -20,6 +21,7 @@ class RedisCache:
             raise ValueError("Redis URL required. Set REDIS_URL env var or pass redis_url parameter.")
         self.ttl_seconds = ttl_seconds
         self.key_prefix = key_prefix
+        self.lock_prefix = "sentinel:lock:"  # Prefix for distributed locks
         self.client: Optional[redis.Redis] = None
         self._hits = 0
         self._misses = 0
@@ -153,4 +155,138 @@ class RedisCache:
             return deleted
         except Exception as e:
             logger.error(f"Error clearing cache: {e}")
-            return 0
+            return 0    
+    def _make_lock_key(self, prompt: str, model: str) -> str:
+        """
+        Generate deterministic lock key from prompt and model.
+        
+        Why hash? 
+        - Prompts can be long (>1KB) → inefficient as Redis key
+        - Hash = fixed size (64 chars), deterministic, collision-resistant
+        
+        Why SHA256?
+        - Fast, deterministic, sufficient collision resistance for this use case
+        - Alternative: MD5 (faster but weaker), UUID (not deterministic)
+        
+        Lock key format: "sentinel:lock:{sha256_hash}"
+        Example: "sentinel:lock:a3f5c9..."
+        
+        Interview question: "Why hash the prompt instead of using it directly?"
+        Answer: "Prompts are variable length, can be very long. Hash gives fixed-size,
+        Redis-friendly key. Same prompt+model always → same hash → same lock."
+        """
+        # Combine prompt and model to ensure different models don't share locks
+        # Example: "What is Python?" with gpt-4 vs llama should have different locks
+        lock_input = f"{prompt}:{model}"
+        hash_digest = hashlib.sha256(lock_input.encode()).hexdigest()
+        return f"{self.lock_prefix}{hash_digest}"
+    
+    async def acquire_lock(self, prompt: str, model: str, ttl_seconds: int = 30) -> bool:
+        """
+        Attempt to acquire distributed lock for LLM call.
+        
+        Why distributed lock?
+        - Prevents duplicate LLM calls when identical requests arrive concurrently
+        - Example: 2 requests for "What is Python?" arrive within 1ms
+          → Without lock: both call LLM (2x cost)
+          → With lock: first acquires lock + calls LLM, second waits for cache
+        
+        Algorithm: Redis SET NX EX (atomic operation)
+        - NX: Set if Not eXists (only succeeds if key doesn't exist)
+        - EX: Set EXpiry (TTL in seconds)
+        - Atomic: Both operations happen together, no race condition
+        
+        Args:
+            prompt: User prompt (used to generate lock key)
+            model: LLM model name (different models = different locks)
+            ttl_seconds: Lock TTL (default 30s)
+        
+        Returns:
+            True if lock acquired (this request should call LLM)
+            False if lock already held (another request is calling LLM)
+        
+        TTL Reasoning:
+        - 30s = typical LLM call time (5-15s) + safety margin
+        - Too short: Lock expires while LLM still running → duplicate calls
+        - Too long: If holder crashes, next request waits too long
+        - Trade-off: 30s balances safety vs latency
+        
+        Failure mode:
+        - If Redis down: Returns False (fail-open, allow request to proceed)
+        - Alternative: Return True = both requests call LLM (2x cost)
+        - Decision: Fail-open = prefer availability over preventing duplicates
+        
+        Interview question: "What if lock holder crashes before releasing?"
+        Answer: "TTL auto-expires lock after 30s. Next request can then proceed.
+        This prevents deadlocks but means potential 30s wait on crash."
+        
+        Interview question: "Why not use Redlock (multi-Redis algorithm)?"
+        Answer: "Redlock adds complexity, requires multiple Redis instances.
+        For this use case (cost optimization, not critical correctness),
+        single Redis with TTL is sufficient. Trade-off: simplicity vs safety."
+        """
+        if not self.client:
+            logger.warning("Redis unavailable, skipping lock (fail-open)")
+            return False  # Fail-open: Skip locking, allow duplicate calls
+        
+        try:
+            lock_key = self._make_lock_key(prompt, model)
+            
+            # SET NX EX: Atomic set-if-not-exists with expiry
+            # Returns True if key was set (lock acquired)
+            # Returns False if key already exists (lock held by another request)
+            acquired = await self.client.set(
+                lock_key,
+                "locked",  # Value doesn't matter, key existence is the lock
+                nx=True,   # Only set if key doesn't exist (NX = Not eXists)
+                ex=ttl_seconds  # Expire after TTL seconds (EX = EXpiry)
+            )
+            
+            if acquired:
+                logger.info(f"Lock acquired: {lock_key[:50]}... (TTL={ttl_seconds}s)")
+            else:
+                logger.info(f"Lock already held: {lock_key[:50]}... (waiting for other request)")
+            
+            return bool(acquired)
+        
+        except Exception as e:
+            logger.error(f"Lock acquisition error: {e}, failing open")
+            return False  # Fail-open on errors
+    
+    async def release_lock(self, prompt: str, model: str) -> None:
+        """
+        Release distributed lock after LLM call completes.
+        
+        Why release explicitly?
+        - Frees lock immediately (don't wait for TTL)
+        - Allows next waiting request to proceed faster
+        - Good citizenship: hold locks for minimum time
+        
+        Failure handling:
+        - If delete fails: Lock will expire via TTL (graceful degradation)
+        - Not critical: worst case = next request waits for TTL
+        
+        Interview question: "What if release fails?"
+        Answer: "Lock expires via TTL anyway. Release is optimization for
+        faster unlock, not required for correctness. Fail gracefully."
+        """
+        if not self.client:
+            return
+        
+        try:
+            lock_key = self._make_lock_key(prompt, model)
+            deleted = await self.client.delete(lock_key)
+            
+            if deleted:
+                logger.info(f"Lock released: {lock_key[:50]}...")
+            else:
+                logger.debug(f"Lock already expired: {lock_key[:50]}...")
+        
+        except Exception as e:
+            logger.error(f"Lock release error: {e} (will expire via TTL)")
+    
+    async def disconnect(self) -> None:
+        """Close Redis connection."""
+        if self.client:
+            await self.client.close()
+            logger.info("Redis connection closed")

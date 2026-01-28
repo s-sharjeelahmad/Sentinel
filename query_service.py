@@ -37,6 +37,7 @@ INTERVIEW QUESTION:
 
 import logging
 import time
+import asyncio
 from typing import Optional
 
 from cache_redis import RedisCache
@@ -170,36 +171,127 @@ class QueryService:
         # This is where real cost happens: external API call, money spent
         # Interview question: "What happens if LLM API is down?"
         # Current answer: Exception propagates, user sees error. Phase 5 will add circuit breaker.
+        
+        # PHASE 3: CONCURRENCY SAFETY
+        # Problem: Two identical requests arrive simultaneously
+        #   → Both see cache miss → Both call LLM → 2x cost (race condition)
+        # Solution: Distributed lock (first request locks, calls LLM; second waits for cache)
+        
         try:
-            logger.info(f"Cache MISS: calling LLM")
+            logger.info(f"Cache MISS: attempting lock for LLM call")
             
-            llm_result = await self.llm_provider.call(
-                prompt=prompt,
-                model=request.model,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens
-            )
+            # Try to acquire distributed lock
+            # Lock key = hash(prompt + model) ensures identical requests share same lock
+            # TTL = 30s prevents deadlock if this process crashes mid-LLM-call
+            lock_acquired = await self.cache.acquire_lock(prompt, request.model, ttl_seconds=30)
             
-            llm_response = llm_result["response"]
-            cost_usd = llm_result["cost_usd"]
-            latency_ms = (time.perf_counter() - start_time) * 1000
-            tokens_used = llm_result["tokens_used"]
+            if lock_acquired:
+                # We got the lock - we're responsible for calling LLM
+                # This is the "fast path" - first request for this prompt
+                logger.info(f"Lock acquired, calling LLM")
+                
+                try:
+                    llm_result = await self.llm_provider.call(
+                        prompt=prompt,
+                        model=request.model,
+                        temperature=request.temperature,
+                        max_tokens=request.max_tokens
+                    )
+                    
+                    llm_response = llm_result["response"]
+                    cost_usd = llm_result["cost_usd"]
+                    latency_ms = (time.perf_counter() - start_time) * 1000
+                    tokens_used = llm_result["tokens_used"]
+                    
+                    # Store in cache for future queries (and for waiting requests)
+                    # Note: Stores both response AND embedding for semantic search
+                    await self.cache.set(prompt, llm_response, query_embedding)
+                    logger.info(f"LLM call: latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
+                    
+                    return QueryResponse(
+                        response=llm_response,
+                        cache_hit=False,
+                        similarity_score=None,
+                        matched_prompt=None,
+                        provider="groq",
+                        model=request.model,
+                        tokens_used=tokens_used,
+                        latency_ms=latency_ms
+                    )
+                
+                finally:
+                    # Always release lock, even if LLM call fails
+                    # Why finally? Ensures lock released on exception (prevents deadlock)
+                    # If release fails, TTL will expire lock anyway (graceful degradation)
+                    await self.cache.release_lock(prompt, request.model)
+                    logger.info(f"Lock released")
             
-            # Store in cache for future queries
-            # Note: Stores both response AND embedding for semantic search
-            await self.cache.set(prompt, llm_response, query_embedding)
-            logger.info(f"LLM call: latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
-            
-            return QueryResponse(
-                response=llm_response,
-                cache_hit=False,
-                similarity_score=None,
-                matched_prompt=None,
-                provider="groq",
-                model=request.model,
-                tokens_used=tokens_used,
-                latency_ms=latency_ms
-            )
+            else:
+                # Lock already held by another request
+                # This is the "slow path" - we arrived while another request is calling LLM
+                # Strategy: Poll cache with exponential backoff until result appears
+                logger.info(f"Lock held by another request, polling cache")
+                
+                # Polling parameters
+                max_wait_seconds = 30  # Match lock TTL
+                poll_interval_ms = 100  # Start with 100ms
+                max_poll_interval_ms = 2000  # Cap at 2s
+                
+                elapsed = 0
+                while elapsed < max_wait_seconds:
+                    # Wait before polling (exponential backoff)
+                    await asyncio.sleep(poll_interval_ms / 1000)
+                    elapsed += poll_interval_ms / 1000
+                    
+                    # Check if cache now has the result
+                    cached_response, is_hit = await self.cache.get(prompt)
+                    if is_hit:
+                        latency_ms = (time.perf_counter() - start_time) * 1000
+                        logger.info(f"Cache populated by other request: latency={latency_ms:.1f}ms (waited {elapsed:.1f}s)")
+                        return QueryResponse(
+                            response=cached_response or "",
+                            cache_hit=True,
+                            similarity_score=1.0,
+                            matched_prompt=prompt,
+                            provider=request.provider,
+                            model=request.model,
+                            tokens_used=0,
+                            latency_ms=latency_ms
+                        )
+                    
+                    # Exponential backoff: double interval, cap at max
+                    poll_interval_ms = min(poll_interval_ms * 2, max_poll_interval_ms)
+                
+                # Timeout: Other request took too long or failed
+                # Fallback: Try calling LLM ourselves (lock may have expired)
+                logger.warning(f"Polling timeout after {max_wait_seconds}s, attempting LLM call")
+                
+                # Retry LLM call (lock should have expired by now)
+                llm_result = await self.llm_provider.call(
+                    prompt=prompt,
+                    model=request.model,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens
+                )
+                
+                llm_response = llm_result["response"]
+                cost_usd = llm_result["cost_usd"]
+                latency_ms = (time.perf_counter() - start_time) * 1000
+                tokens_used = llm_result["tokens_used"]
+                
+                await self.cache.set(prompt, llm_response, query_embedding)
+                logger.info(f"LLM call (after timeout): latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
+                
+                return QueryResponse(
+                    response=llm_response,
+                    cache_hit=False,
+                    similarity_score=None,
+                    matched_prompt=None,
+                    provider="groq",
+                    model=request.model,
+                    tokens_used=tokens_used,
+                    latency_ms=latency_ms
+                )
         
         except Exception as e:
             # Error handling: Return error response instead of raising
