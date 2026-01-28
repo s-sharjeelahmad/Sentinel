@@ -1,16 +1,16 @@
 # Sentinel - Semantic AI Gateway
 
-Production-ready semantic caching layer that reduces redundant LLM API calls by up to 90%.
+🚀 **Production-ready semantic caching layer that reduces redundant LLM API calls by up to 90%.**
 
 ## What is Sentinel?
 
 Sentinel is a semantic AI gateway that sits between your application and LLM providers. It uses embedding-based semantic caching to:
 
-- **Reduce costs by 70-90%** - Cache semantically similar queries
-- **Improve latency by 200x** - 5ms cache hits vs 1000ms API calls
-- **Prevent redundant API calls** - Exact and semantic matching
-- **Track metrics** - Monitor hit rates, costs, latency
-- **Production optimized** - Model pre-cached, async I/O, validation
+- **Reduce costs by 70-90%** — Cache semantically similar queries
+- **Improve latency by 200x** — 5ms cache hits vs 1000ms API calls  
+- **Prevent redundant calls** — Distributed locking + semantic matching
+- **Track metrics** — Prometheus-compatible observability
+- **Production-ready** — Graceful shutdown, circuit breaker, rate limiting
 
 ## Tech Stack
 
