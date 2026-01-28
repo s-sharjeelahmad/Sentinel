@@ -5,6 +5,7 @@ Sentinel: Semantic AI Gateway - Reduce redundant LLM calls with intelligent cach
 import logging
 import time
 import asyncio
+import os
 from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -22,6 +23,8 @@ from llm_provider import initialize_llm_provider, cleanup_llm_provider
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Security Configuration
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 cache = RedisCache(redis_url=None, ttl_seconds=3600, key_prefix="sentinel:cache:")
 
 
@@ -32,7 +35,13 @@ async def lifespan(app: FastAPI):
         await cache.connect()
         await embedding_model.load()
         await initialize_llm_provider()
-        logger.info("Sentinel started")
+        
+        # Startup validation with security awareness
+        logger.info("✓ Sentinel started successfully")
+        if DEBUG_MODE:
+            logger.warning("⚠️  DEBUG MODE ENABLED - Debug endpoints exposed. Disable in production (set DEBUG_MODE=false)")
+        else:
+            logger.info("✓ Debug endpoints disabled (production-safe)")
     except Exception as e:
         logger.error(f"Startup failed: {e}")
         raise
@@ -139,12 +148,12 @@ async def metrics() -> MetricsResponse:
 # ============================================================================
 # DEBUG ENDPOINTS - For testing semantic caching
 # ============================================================================
-# TODO: Add authentication (X-API-Key header) before deploying to production
-# These endpoints expose sensitive data and allow destructive operations.
-# Recommended: Use environment variable DEBUG_MODE to conditionally enable.
+# SECURITY: These endpoints expose sensitive data and allow destructive operations.
+# They are conditionally enabled via DEBUG_MODE environment variable (default: false).
 
-@app.get("/v1/cache/all", tags=["debug"])
-async def get_all_cached() -> dict:
+if DEBUG_MODE:
+    @app.get("/v1/cache/all", tags=["debug"])
+    async def get_all_cached() -> dict:
     """
     Get all cached prompts with their responses and embeddings.
     
@@ -183,9 +192,8 @@ async def get_all_cached() -> dict:
         logger.error(f"Error getting cached items: {e}")
         return {"error": str(e)}
 
-
-@app.delete("/v1/cache/clear", tags=["debug"])
-async def clear_cache() -> dict:
+    @app.delete("/v1/cache/clear", tags=["debug"])
+    async def clear_cache() -> dict:
     """
     Clear all cached entries from Redis.
     
@@ -218,8 +226,7 @@ async def clear_cache() -> dict:
         logger.error(f"Error clearing cache: {e}")
         return {"error": str(e)}
 
-
-@app.post("/v1/cache/test-embeddings", tags=["debug"])
+    @app.post("/v1/cache/test-embeddings", tags=["debug"])
 async def test_embeddings(request: QueryRequest) -> dict:
     """
     Debug endpoint: Test embedding generation and similarity calculation.
@@ -259,7 +266,8 @@ async def test_embeddings(request: QueryRequest) -> dict:
     except Exception as e:
         logger.error(f"Error in embedding test: {e}")
         return {"error": str(e)}
-
+else:
+    logger.info("Debug endpoints disabled (DEBUG_MODE=false)")
 
 # ============================================================================
 # ENTRY POINT
