@@ -23,7 +23,6 @@ from llm_provider import initialize_llm_provider, cleanup_llm_provider
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Security Configuration
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 cache = RedisCache(redis_url=None, ttl_seconds=3600, key_prefix="sentinel:cache:")
 
@@ -36,12 +35,11 @@ async def lifespan(app: FastAPI):
         await embedding_model.load()
         await initialize_llm_provider()
         
-        # Startup validation with security awareness
-        logger.info("✓ Sentinel started successfully")
+        logger.info("Sentinel started")
         if DEBUG_MODE:
-            logger.warning("⚠️  DEBUG MODE ENABLED - Debug endpoints exposed. Disable in production (set DEBUG_MODE=false)")
+            logger.warning("DEBUG MODE ENABLED - Debug endpoints exposed")
         else:
-            logger.info("✓ Debug endpoints disabled (production-safe)")
+            logger.info("Debug endpoints disabled")
     except Exception as e:
         logger.error(f"Startup failed: {e}")
         raise
@@ -145,12 +143,7 @@ async def metrics() -> MetricsResponse:
     return MetricsResponse(total_requests=stats["total_requests"], cache_hits=stats["cache_hits"], cache_misses=stats["cache_misses"], hit_rate_percent=stats["hit_rate_percent"], stored_items=stats["stored_items"], uptime_seconds=0)
 
 
-# ============================================================================
-# DEBUG ENDPOINTS - For testing semantic caching
-# ============================================================================
-# SECURITY: These endpoints expose sensitive data and allow destructive operations.
-# They are conditionally enabled via DEBUG_MODE environment variable (default: false).
-
+# Debug endpoints (conditionally enabled via DEBUG_MODE)
 if DEBUG_MODE:
     @app.get("/v1/cache/all", tags=["debug"])
     async def get_all_cached() -> dict:
