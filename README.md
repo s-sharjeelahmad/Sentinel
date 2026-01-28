@@ -1,156 +1,163 @@
-# 🛡️ Sentinel - Semantic AI Gateway
+# Sentinel - Semantic AI Gateway
 
-**A production-ready semantic caching layer that reduces redundant LLM API calls by up to 90%.**
+Production-ready semantic caching layer that reduces redundant LLM API calls by up to 90%.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
-[![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
+## What is Sentinel?
 
----
+Sentinel is a semantic AI gateway that sits between your application and LLM providers. It uses embedding-based semantic caching to:
 
-## 🚀 **What is Sentinel?**
+- **Reduce costs by 70-90%** - Cache semantically similar queries
+- **Improve latency by 200x** - 5ms cache hits vs 1000ms API calls
+- **Prevent redundant API calls** - Exact and semantic matching
+- **Track metrics** - Monitor hit rates, costs, latency
+- **Production optimized** - Model pre-cached, async I/O, validation
 
-Sentinel is a **semantic AI gateway** that sits between your application and LLM providers (Groq, OpenAI, etc.). It uses **embedding-based semantic caching** to:
+## Tech Stack
 
-- ✅ **Reduce costs by 70-90%** - Cache semantically similar queries
-- ✅ **Improve latency by 200x** - 5ms cache hits vs 1000ms API calls
-- ✅ **Prevent redundant API calls** - Exact and semantic matching
-- ✅ **Track usage metrics** - Monitor hit rates, costs, latency
-- ✅ **Production optimized** - Model pre-cached, modern FastAPI lifespan, strict validation
+- FastAPI 0.104 (async)
+- Redis 7.0 (distributed cache)
+- Jina Embeddings API (external, no local model)
+- aiohttp (async HTTP)
+- Pydantic (validation)
+- Docker (74MB minimal image)
 
----
-
-## 🎯 **Key Features**
-
-| Feature              | Description                                                     |
-| -------------------- | --------------------------------------------------------------- |
-| **Semantic Caching** | HuggingFace Inference API (all-MiniLM-L6-v2, 384D embeddings)   |
-| **Multi-Provider**   | Support for Groq (default), OpenAI, and extensible architecture |
-| **Production-Ready** | 74MB Docker image, async I/O, error handling, logging, metrics  |
-| **Fast**             | Redis-backed cache, instant startup (<1s), no model downloads   |
-| **Configurable**     | Similarity thresholds, TTL, embedding provider selection        |
-
----
-
-## 📊 **How It Works**
+## How It Works
 
 ```
-User Query → Sentinel
-              ↓
-         [1] Compute embedding (HF API)
-              ↓
-         [2] Check exact cache match? → ✅ Return (5ms)
-              ↓ No
-         [3] Check semantic match? → ✅ Return (50ms)
-              ↓ No
-         [4] Call LLM API → Cache result → Return (1250ms)
+Query → Sentinel
+  ↓
+[1] Compute embedding (Jina API)
+  ↓
+[2] Exact cache match? → Return (5ms) ✅
+  ↓ No
+[3] Semantic match? → Return (50ms) ✅
+  ↓ No
+[4] Call LLM (Groq) → Cache → Return (1250ms)
 ```
 
-**Key optimization:** Embedding computation via external API means:
+## Quick Start
 
-- 256MB RAM sufficient (no local model)
-- <1s startup (no model download)
-- Instant horizontal scaling (stateless)
-
-**Example:**
-
-- Query 1: "What is 2+2?" → Cache MISS → Groq API → 1234ms
-- Query 2: "What is 2+2?" → Cache HIT (exact) → 5ms ⚡
-- Query 3: "What's two plus two?" → Cache HIT (semantic) → 45ms 🎯
-
-**Savings:** 2 out of 3 queries served from cache = **66% cost reduction!**
-
----
-
-## 🛠️ **Tech Stack**
-
-- **FastAPI** 0.104 - Async web framework
-- **Redis** 7.0 - Distributed cache
-- **HuggingFace Inference API** - Embeddings (external, no local model)
-- **aiohttp** - Async HTTP client for embeddings & LLM providers
-- **Pydantic** - Request/response validation
-- **Docker** - Minimal 74MB image, multi-stage build
-
----
-
-## 📦 **Quick Start**
-
-### **1. Clone the Repository**
+### 1. Install Dependencies
 
 ```bash
-git clone https://github.com/s-sharjeelahmad/Sentinel.git
-cd Sentinel
-```
-
-### **2. Set Up Environment**
-
-```bash
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### **3. Configure Environment Variables**
+### 2. Set Environment Variables
 
-Create a `.env` file:
+Create `.env`:
 
 ```env
-GROQ_API_KEY=your_groq_api_key_here
+GROQ_API_KEY=your_key
+JINA_API_KEY=your_key
 REDIS_URL=redis://localhost:6379
 ```
 
-### **4. Start Redis**
+### 3. Start Redis
 
 ```bash
-# Option A: Using Docker
 docker run -d -p 6379:6379 redis:7-alpine
-
-# Option B: Local installation
-redis-server
 ```
 
-### **5. Run Sentinel**
+### 4. Run Sentinel
 
 ```bash
 python main.py
 ```
 
-Server starts at `http://localhost:8001` 🚀
+Server at `http://localhost:8000`
 
----
+## Docker Deployment
 
-## 🐳 **Docker Deployment**
-
-### **Local Testing with Docker Compose**
+### Local with Docker Compose
 
 ```bash
-# Start both Sentinel + Redis
 docker-compose up -d
-
-# Check logs
 docker-compose logs -f
-
-# Stop
-docker-compose down
 ```
 
-### **Production Deployment**
+### Production
 
 ```bash
-# Build image
 docker build -t sentinel:latest .
-
-# Run container
-docker run -d \
-  -p 8001:8001 \
+docker run -d -p 8000:8000 \
   -e GROQ_API_KEY=your_key \
-  -e REDIS_URL=redis://your-redis:6379 \
+  -e JINA_API_KEY=your_key \
+  -e REDIS_URL=redis://... \
   sentinel:latest
 ```
+
+## API Endpoints
+
+### POST `/v1/query`
+
+Submit a prompt with semantic caching.
+
+**Request:**
+
+```json
+{
+  "prompt": "What is quantum computing?",
+  "similarity_threshold": 0.75
+}
+```
+
+**Response:**
+
+```json
+{
+  "response": "Quantum computing is...",
+  "cache_hit": true,
+  "similarity_score": 0.92,
+  "latency_ms": 45.2
+}
+```
+
+### GET `/v1/metrics`
+
+Cache statistics and hit rate.
+
+### GET `/health`
+
+Health check for load balancers.
+
+## Configuration
+
+Edit in `main.py`:
+
+- `cache.ttl_seconds`: TTL for cache entries (default: 3600)
+- `key_prefix`: Redis key prefix (default: "sentinel:cache:")
+- `similarity_threshold`: Default similarity threshold (default: 0.75)
+
+## Deployment (Fly.io)
+
+```bash
+fly auth login
+fly launch
+fly secrets set GROQ_API_KEY=your_key
+fly secrets set JINA_API_KEY=your_key
+fly deploy
+```
+
+## Performance Benchmarks
+
+| Scenario              | Latency  | Cost Saved                        |
+| --------------------- | -------- | --------------------------------- |
+| Cache hit (exact)     | 5ms      | $0 (100%)                         |
+| Cache hit (semantic)  | 45ms     | $0 (100%)                         |
+| Cache miss (LLM call) | 1250ms   | -                                 |
+| 3 similar queries     | 45ms avg | ~$0.002 vs $0.006 (67% reduction) |
+
+## License
+
+MIT
+
+-e REDIS_URL=redis://your-redis:6379 \
+ sentinel:latest
+
+````
 
 ---
 
@@ -169,7 +176,7 @@ fly auth login
 fly launch
 fly secrets set GROQ_API_KEY=your_key
 fly deploy
-```
+````
 
 **Free tier:** 3 shared VMs, 3GB storage, managed Redis
 
@@ -190,7 +197,7 @@ fly deploy
 ### **POST /v1/query - Send a query**
 
 ```bash
-curl -X POST http://localhost:8001/v1/query \
+curl -X POST http://localhost:8000/v1/query \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "What is quantum computing?",
@@ -219,7 +226,7 @@ curl -X POST http://localhost:8001/v1/query \
 ### **GET /v1/metrics - View cache statistics**
 
 ```bash
-curl http://localhost:8001/v1/metrics
+curl http://localhost:8000/v1/metrics
 ```
 
 **Response:**
@@ -238,7 +245,7 @@ curl http://localhost:8001/v1/metrics
 ### **GET /health - Health check**
 
 ```bash
-curl http://localhost:8001/health
+curl http://localhost:8000/health
 ```
 
 ---
