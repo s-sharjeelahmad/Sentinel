@@ -7,7 +7,7 @@
 Sentinel is a semantic AI gateway that sits between your application and LLM providers. It uses embedding-based semantic caching to:
 
 - **Reduce costs by 70-90%** — Cache semantically similar queries
-- **Improve latency by 200x** — 5ms cache hits vs 1000ms API calls  
+- **Improve latency by 200x** — 5ms cache hits vs 1000ms API calls
 - **Prevent redundant calls** — Distributed locking + semantic matching
 - **Track metrics** — Prometheus-compatible observability
 - **Production-ready** — Graceful shutdown, circuit breaker, rate limiting
