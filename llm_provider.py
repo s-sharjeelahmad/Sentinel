@@ -35,7 +35,7 @@ class CircuitBreaker:
         """Execute coroutine with circuit breaker protection."""
         if self.state == CircuitBreakerState.OPEN:
             # Check if cooldown period has elapsed
-            if time.time() - self.last_failure_time > self.cooldown_sec:
+            if self.last_failure_time and time.time() - self.last_failure_time > self.cooldown_sec:
                 self.state = CircuitBreakerState.HALF_OPEN
                 logger.info("Circuit breaker: HALF_OPEN - attempting recovery")
             else:
