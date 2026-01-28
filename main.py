@@ -11,6 +11,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from starlette.responses import Response
 
 load_dotenv()
 
@@ -22,6 +24,7 @@ from llm_provider import initialize_llm_provider, cleanup_llm_provider
 from query_service import QueryService
 from auth import APIKeyAuth, auth_middleware
 from rate_limiter import TokenBucketRateLimiter
+import metrics  # Prometheus instrumentation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -102,12 +105,32 @@ app = FastAPI(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Log request method, path, and response latency."""
+    """
+    Log request method, path, and response latency.
+    
+    PHASE 4: Also records Prometheus metrics for every request.
+    - Increments request counter with endpoint and status labels
+    - Records latency histogram
+    """
     start_time = time.time()
-    logger.info(f"→ {request.method} {request.url.path}")
+    endpoint = request.url.path
+    
+    logger.info(f"→ {request.method} {endpoint}")
+    
     response = await call_next(request)
+    
     latency_ms = (time.time() - start_time) * 1000
+    latency_seconds = latency_ms / 1000
+    
     logger.info(f"← {response.status_code} | {latency_ms:.1f}ms")
+    
+    # PHASE 4: Record request metrics (RED: Rate, Errors, Duration)
+    metrics.record_request(
+        endpoint=endpoint,
+        status=response.status_code,
+        duration_seconds=latency_seconds
+    )
+    
     return response
 
 
@@ -126,6 +149,7 @@ async def authentication_middleware(request: Request, call_next):
     Excluded routes (public):
     - / (root health check)
     - /health (load balancer health check)
+    - /metrics (Prometheus scraping)
     - /docs, /openapi.json (API documentation)
     """
     return await auth_middleware(request, call_next, auth)
@@ -186,9 +210,66 @@ async def query(request: QueryRequest) -> QueryResponse:
     return await query_service.execute_query(request)
 
 
+@app.get("/metrics", tags=["monitoring"])
+async def prometheus_metrics() -> Response:
+    """
+    Prometheus metrics endpoint.
+    
+    PHASE 4: Exposes metrics in Prometheus text format for scraping.
+    
+    Why /metrics?
+    - Standard endpoint name (Prometheus convention)
+    - Pull-based: Prometheus scrapes this endpoint periodically
+    - Alternative: Push to Pushgateway (for batch jobs, not services)
+    
+    Format:
+    - Plain text (not JSON)
+    - HELP lines describe metrics
+    - TYPE lines specify metric type (counter, histogram, gauge)
+    - Actual metric lines with labels and values
+    
+    Example output:
+        # HELP sentinel_requests_total Total HTTP requests to Sentinel API
+        # TYPE sentinel_requests_total counter
+        sentinel_requests_total{endpoint="/v1/query",status="200"} 42.0
+        sentinel_requests_total{endpoint="/v1/query",status="401"} 3.0
+    
+    Access control:
+    - Public endpoint (no auth required)
+    - Standard practice: Metrics exposed to monitoring system
+    - If sensitive: Add firewall rules to restrict to Prometheus IP
+    
+    Interview question: "Should metrics be authenticated?"
+    Answer: "Depends. Aggregate metrics (counts, latencies) usually public.
+    If metrics contain PII or business secrets, auth required. Sentinel metrics
+    are aggregate only, safe to expose."
+    
+    Testing:
+        curl http://localhost:8000/metrics
+    
+    Prometheus config:
+        scrape_configs:
+          - job_name: 'sentinel'
+            static_configs:
+              - targets: ['localhost:8000']
+    """
+    # Generate Prometheus text format from REGISTRY
+    # REGISTRY automatically collects all metrics defined in metrics.py
+    return Response(
+        content=generate_latest(metrics.REGISTRY),
+        media_type=CONTENT_TYPE_LATEST
+    )
+
+
 @app.get("/v1/metrics", response_model=MetricsResponse, tags=["monitoring"])
-async def metrics() -> MetricsResponse:
-    """Return cache statistics."""
+async def metrics_json() -> MetricsResponse:
+    """
+    Return cache statistics (legacy JSON endpoint).
+    
+    PHASE 4: For Prometheus metrics, use GET /metrics instead.
+    This endpoint returns JSON (not Prometheus format).
+    Kept for backwards compatibility and quick debugging.
+    """
     stats = await cache.stats()
     return MetricsResponse(
         total_requests=stats["total_requests"],

@@ -44,6 +44,7 @@ from cache_redis import RedisCache
 from embeddings import EmbeddingModel
 from llm_provider import LLMProvider
 from models import QueryRequest, QueryResponse
+import metrics  # Prometheus instrumentation
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,10 @@ class QueryService:
         if is_hit:
             latency_ms = (time.perf_counter() - start_time) * 1000
             logger.info(f"Cache HIT (exact): similarity=1.00 | latency={latency_ms:.1f}ms")
+            
+            # PHASE 4: Record exact cache hit metric
+            metrics.record_cache_hit("exact")
+            
             return QueryResponse(
                 response=cached_response or "",
                 cache_hit=True,
@@ -156,6 +161,10 @@ class QueryService:
             latency_ms = (time.perf_counter() - start_time) * 1000
             similarity = semantic_hit["similarity"]
             logger.info(f"Cache HIT (semantic): similarity={similarity:.2f} | latency={latency_ms:.1f}ms")
+            
+            # PHASE 4: Record semantic cache hit metric
+            metrics.record_cache_hit("semantic")
+            
             return QueryResponse(
                 response=semantic_hit["response"],
                 cache_hit=True,
@@ -180,6 +189,9 @@ class QueryService:
         try:
             logger.info(f"Cache MISS: attempting lock for LLM call")
             
+            # PHASE 4: Record cache miss metric
+            metrics.record_cache_hit("miss")
+            
             # Try to acquire distributed lock
             # Lock key = hash(prompt + model) ensures identical requests share same lock
             # TTL = 30s prevents deadlock if this process crashes mid-LLM-call
@@ -189,6 +201,9 @@ class QueryService:
                 # We got the lock - we're responsible for calling LLM
                 # This is the "fast path" - first request for this prompt
                 logger.info(f"Lock acquired, calling LLM")
+                
+                # PHASE 4: Track active lock
+                metrics.increment_active_locks()
                 
                 try:
                     llm_result = await self.llm_provider.call(
@@ -202,6 +217,13 @@ class QueryService:
                     cost_usd = llm_result["cost_usd"]
                     latency_ms = (time.perf_counter() - start_time) * 1000
                     tokens_used = llm_result["tokens_used"]
+                    
+                    # PHASE 4: Record LLM cost metric
+                    metrics.record_llm_cost(
+                        provider=llm_result.get("provider", "groq"),
+                        model=request.model,
+                        cost_usd=cost_usd
+                    )
                     
                     # Store in cache for future queries (and for waiting requests)
                     # Note: Stores both response AND embedding for semantic search
@@ -223,6 +245,10 @@ class QueryService:
                     # Always release lock, even if LLM call fails
                     # Why finally? Ensures lock released on exception (prevents deadlock)
                     # If release fails, TTL will expire lock anyway (graceful degradation)
+                    
+                    # PHASE 4: Decrement active lock gauge
+                    metrics.decrement_active_locks()
+                    
                     await self.cache.release_lock(prompt, request.model)
                     logger.info(f"Lock released")
             
@@ -248,6 +274,10 @@ class QueryService:
                     if is_hit:
                         latency_ms = (time.perf_counter() - start_time) * 1000
                         logger.info(f"Cache populated by other request: latency={latency_ms:.1f}ms (waited {elapsed:.1f}s)")
+                        
+                        # PHASE 4: This is effectively an exact cache hit (waited for lock holder)
+                        # Already recorded cache miss earlier, so don't double-count
+                        
                         return QueryResponse(
                             response=cached_response or "",
                             cache_hit=True,
@@ -278,6 +308,13 @@ class QueryService:
                 cost_usd = llm_result["cost_usd"]
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 tokens_used = llm_result["tokens_used"]
+                
+                # PHASE 4: Record LLM cost metric (timeout fallback path)
+                metrics.record_llm_cost(
+                    provider=llm_result.get("provider", "groq"),
+                    model=request.model,
+                    cost_usd=cost_usd
+                )
                 
                 await self.cache.set(prompt, llm_response, query_embedding)
                 logger.info(f"LLM call (after timeout): latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
