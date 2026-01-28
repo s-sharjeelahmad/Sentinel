@@ -2,7 +2,7 @@
 Sentinel Embeddings Module
 Convert text to semantic embeddings for similarity comparison.
 
-Uses Hugging Face Inference API (external, no local model needed).
+Uses Jina Embeddings API (free tier, enterprise-grade reliability).
 """
 
 import logging
@@ -16,78 +16,86 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingModel:
     """
-    Wrapper for Hugging Face Inference API embeddings.
+    Wrapper for Jina Embeddings API.
     
     Purpose:
-    - Convert prompts to embedding vectors via API
+    - Convert prompts to embedding vectors via remote API
     - Compare embeddings via cosine similarity
     - Support semantic caching (find similar cached responses)
     
     Advantages:
-    - No local model storage (saves 90MB)
-    - Instant startup (no model download)
+    - Reliable, enterprise-grade service
+    - Free tier: 1M tokens/month (more than enough for MVP)
+    - Zero maintenance, no self-hosting
+    - Fast, accurate embeddings
     - Works on 256MB Fly.io machine
-    - Free tier available (HuggingFace account)
     """
     
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "jina-embeddings-v3"):
         """
-        Initialize Hugging Face Inference API embeddings.
+        Initialize Jina Embeddings API.
         
         Args:
-            model_name: HF model identifier (using API endpoint)
+            model_name: Jina model identifier (jina-embeddings-v3, jina-embeddings-v2-base-en, etc.)
         """
         self.model_name = model_name
-        self.api_token = os.getenv("HF_API_TOKEN")
+        self.api_token = os.getenv("JINA_API_KEY")
         if not self.api_token:
-            raise ValueError("HF_API_TOKEN environment variable required for embeddings API")
+            raise ValueError("JINA_API_KEY environment variable required for embeddings API")
         
-        self.api_url = f"https://api-inference.huggingface.co/models/{model_name}"
-        self.embedding_dim = 384  # all-MiniLM-L6-v2 dimension
+        self.api_url = "https://api.jina.ai/v1/embeddings"
+        self.embedding_dim = 1024  # jina-embeddings-v3 dimension
         self.session: Optional[aiohttp.ClientSession] = None
     
     async def load(self) -> None:
         """Initialize async session."""
         try:
             self.session = aiohttp.ClientSession()
-            logger.info(f"✅ Embedding model configured (HF API: {self.model_name})")
+            logger.info(f"✅ Embedding model configured (Jina API: {self.model_name})")
         except Exception as e:
             logger.error(f"❌ Failed to configure embedding model: {e}")
             raise
     
     async def embed(self, text: str) -> np.ndarray:
         """
-        Convert text to embedding vector via HF Inference API.
+        Convert text to embedding vector via Jina API.
         
         Args:
             text: The text to embed (prompt or cached response)
             
         Returns:
-            numpy array of shape (384,) for all-MiniLM-L6-v2
+            numpy array of shape (1024,) for jina-embeddings-v3
             
         Example:
             embedding = await model.embed("What is machine learning?")
-            # embedding.shape = (384,)
+            # embedding.shape = (1024,)
         """
         if not self.session:
             raise RuntimeError("Model not loaded. Call load() first.")
         
         try:
-            headers = {"Authorization": f"Bearer {self.api_token}"}
-            payload = {"inputs": text}
+            headers = {
+                "Authorization": f"Bearer {self.api_token}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "input": [text],  # Jina accepts list of strings
+                "model": self.model_name
+            }
             
-            async with self.session.post(self.api_url, json=payload, headers=headers) as resp:
+            async with self.session.post(self.api_url, json=payload, headers=headers, timeout=30) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    raise Exception(f"API error {resp.status}: {error_text}")
+                    raise Exception(f"Jina API error {resp.status}: {error_text}")
                 
                 result = await resp.json()
                 
-            # API returns list of embeddings (one per input)
-            if isinstance(result, list) and len(result) > 0:
-                embedding = np.array(result[0], dtype=np.float32)
+            # Jina returns: {"data": [{"embedding": [...], "index": 0, "object": "embedding"}]}
+            if isinstance(result, dict) and "data" in result and len(result["data"]) > 0:
+                embedding_data = result["data"][0]["embedding"]
+                embedding = np.array(embedding_data, dtype=np.float32)
             else:
-                raise ValueError(f"Unexpected API response: {result}")
+                raise ValueError(f"Unexpected API response format: {result}")
             
             return embedding
         except Exception as e:

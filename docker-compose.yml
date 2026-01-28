@@ -29,8 +29,9 @@ services:
     environment:
       # Override Redis connection for Docker network
       REDIS_URL: redis://redis:6379
-      # Load Groq API key from .env file
+      # Load API keys from .env file
       GROQ_API_KEY: ${GROQ_API_KEY}
+      JINA_API_KEY: ${JINA_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
@@ -45,6 +46,8 @@ services:
       # Mount code for development (hot reload)
       # Comment out for production
       - .:/app
+
+  # LightweightEmbeddings is no longer needed - using Jina remote API instead
 
 volumes:
   redis_data:

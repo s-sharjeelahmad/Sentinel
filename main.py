@@ -156,7 +156,7 @@ async def query(request: QueryRequest) -> QueryResponse:
 
     # Step 1: Compute embedding of current prompt
     try:
-        query_embedding = embedding_model.embed(prompt)
+        query_embedding = await embedding_model.embed(prompt)
     except Exception as e:
         logger.error(f"Embedding error: {e}")
         query_embedding = None
@@ -183,7 +183,18 @@ async def query(request: QueryRequest) -> QueryResponse:
     semantic_hit = None
     if query_embedding is not None:
         cached_items = await cache.get_all_cached()
+        
+        # Debug logging
+        logger.debug(f"Query embedding type: {type(query_embedding).__name__}, shape: {query_embedding.shape}")
+        logger.debug(f"Cached items found: {len(cached_items)}")
+        if cached_items:
+            first_cached = cached_items[0].get("embedding")
+            logger.debug(f"First cached embedding type: {type(first_cached).__name__}, shape: {first_cached.shape if hasattr(first_cached, 'shape') else 'N/A'}")
+        
         semantic_hit = embedding_model.find_similar(query_embedding, cached_items, threshold)
+        logger.debug(f"Semantic match found: {semantic_hit is not None}")
+        if semantic_hit:
+            logger.debug(f"Semantic match similarity: {semantic_hit.get('similarity')}")
 
     if semantic_hit:
         latency_ms = (time.perf_counter() - start_time) * 1000
@@ -264,6 +275,128 @@ async def metrics() -> MetricsResponse:
         stored_items=stats["stored_items"],
         uptime_seconds=0,
     )
+
+
+# ============================================================================
+# DEBUG ENDPOINTS - For testing semantic caching
+# ============================================================================
+
+@app.get("/v1/cache/all", tags=["debug"])
+async def get_all_cached() -> dict:
+    """
+    Get all cached prompts with their responses and embeddings.
+    
+    Useful for debugging semantic matching.
+    
+    Returns:
+        dict with:
+        - cached_items: List of cached prompts
+        - total_cached: Number of cached items
+        - embeddings_stored: Number of embeddings
+    """
+    try:
+        all_cached = await cache.get_all_cached()
+        
+        items_list = []
+        embeddings_count = 0
+        
+        for item in all_cached:
+            embedding = item.get("embedding")
+            items_list.append({
+                "prompt": item["prompt"][:100],  # Truncate for readability
+                "response": item["response"][:100],
+                "embedding_type": str(type(embedding).__name__),
+                "embedding_shape": str(embedding.shape) if hasattr(embedding, 'shape') else "N/A",
+                "embedding_dtype": str(embedding.dtype) if hasattr(embedding, 'dtype') else "N/A",
+            })
+            if embedding is not None:
+                embeddings_count += 1
+        
+        return {
+            "cached_items": items_list,
+            "total_cached": len(all_cached),
+            "embeddings_stored": embeddings_count,
+        }
+    except Exception as e:
+        logger.error(f"Error getting cached items: {e}")
+        return {"error": str(e)}
+
+
+@app.delete("/v1/cache/clear", tags=["debug"])
+async def clear_cache() -> dict:
+    """
+    Clear all cached entries from Redis.
+    
+    WARNING: This deletes all cached responses and embeddings.
+    """
+    try:
+        if not cache.client:
+            return {"error": "Redis not connected"}
+        
+        # Find and delete all keys with our prefix
+        pattern = f"{cache.key_prefix}*"
+        cursor = 0
+        deleted_count = 0
+        
+        while True:
+            cursor, keys = await cache.client.scan(cursor, match=pattern, count=100)
+            for key in keys:
+                await cache.client.delete(key)
+                deleted_count += 1
+            if cursor == 0:
+                break
+        
+        logger.info(f"🗑️ Cache cleared: {deleted_count} keys deleted")
+        return {
+            "status": "success",
+            "deleted_keys": deleted_count,
+            "message": "Cache cleared successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/v1/cache/test-embeddings", tags=["debug"])
+async def test_embeddings(request: QueryRequest) -> dict:
+    """
+    Debug endpoint: Test embedding generation and similarity calculation.
+    
+    Shows:
+    - Query embedding vector
+    - All cached embeddings
+    - Similarity scores for each cached item
+    """
+    try:
+        # Get query embedding
+        query_embedding = await embedding_model.embed(request.prompt)
+        
+        # Get all cached items
+        all_cached = await cache.get_all_cached()
+        
+        # Calculate similarity with each cached item
+        similarity_scores = []
+        for item in all_cached:
+            cached_embedding = item.get("embedding")
+            if cached_embedding is not None:
+                similarity = embedding_model.cosine_similarity(query_embedding, cached_embedding)
+                similarity_scores.append({
+                    "cached_prompt": item["prompt"][:100],
+                    "similarity": float(similarity),
+                    "above_threshold": similarity >= request.similarity_threshold,
+                })
+        
+        return {
+            "query_prompt": request.prompt,
+            "query_embedding_dim": int(query_embedding.shape[0]),
+            "query_embedding_type": str(type(query_embedding).__name__),
+            "cached_items_count": len(all_cached),
+            "similarity_threshold": request.similarity_threshold,
+            "similarity_scores": similarity_scores,
+        }
+    except Exception as e:
+        logger.error(f"Error in embedding test: {e}")
+        return {"error": str(e)}
 
 
 # ============================================================================

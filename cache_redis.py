@@ -211,7 +211,7 @@ class RedisCache:
                     embedding_json = await self.client.get(embedding_key)
                     
                     if embedding_json:
-                        embedding = np.array(json.loads(embedding_json))
+                        embedding = np.array(json.loads(embedding_json), dtype=np.float32)
                         cached_items.append({
                             "prompt": prompt,
                             "response": response,
