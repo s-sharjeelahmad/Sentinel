@@ -20,6 +20,8 @@ from models import QueryRequest, QueryResponse, HealthResponse, MetricsResponse
 import llm_provider
 from llm_provider import initialize_llm_provider, cleanup_llm_provider
 from query_service import QueryService
+from auth import APIKeyAuth, auth_middleware
+from rate_limiter import TokenBucketRateLimiter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -32,11 +34,18 @@ cache = RedisCache(redis_url=None, ttl_seconds=3600, key_prefix="sentinel:cache:
 # Alternative: FastAPI Depends() for request-scoped injection - overkill for stateless service
 query_service: QueryService = None
 
+# Auth and rate limiting - initialized during startup
+# Why separate instances? Single Responsibility Principle
+# - rate_limiter: Enforces request limits
+# - auth: Validates API keys and integrates rate limiting
+rate_limiter: TokenBucketRateLimiter = None
+auth: APIKeyAuth = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: Initialize cache and LLM. Shutdown: Cleanup resources."""
-    global query_service
+    global query_service, rate_limiter, auth
     
     try:
         await cache.connect()
@@ -51,6 +60,20 @@ async def lifespan(app: FastAPI):
             embedding_model=embedding_model,
             llm_provider=llm_provider.llm_provider
         )
+        
+        # Initialize rate limiter with Redis (shared with cache)
+        # Why share Redis? Cost efficiency, fewer connections
+        # Rate limits: 100 requests/minute per API key (configurable via env)
+        rate_limiter = TokenBucketRateLimiter(
+            redis_client=cache.client,
+            max_requests=int(os.getenv("RATE_LIMIT_REQUESTS", "100")),
+            window_seconds=int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+        )
+        
+        # Initialize auth with rate limiter integration
+        # Auth enforces both authentication AND rate limiting
+        # API keys loaded from environment: SENTINEL_USER_KEYS, SENTINEL_ADMIN_KEY
+        auth = APIKeyAuth(rate_limiter=rate_limiter)
         
         logger.info("Sentinel started")
         if DEBUG_MODE:
@@ -86,6 +109,26 @@ async def log_requests(request: Request, call_next):
     latency_ms = (time.time() - start_time) * 1000
     logger.info(f"← {response.status_code} | {latency_ms:.1f}ms")
     return response
+
+
+@app.middleware("http")
+async def authentication_middleware(request: Request, call_next):
+    """
+    Authenticate requests via X-API-Key header and enforce rate limits.
+    
+    Middleware execution order (bottom-up):
+    1. This middleware (auth + rate limit)
+    2. log_requests (logging)
+    3. Endpoint handler
+    
+    Why middleware? Runs BEFORE endpoints, protects all routes automatically.
+    
+    Excluded routes (public):
+    - / (root health check)
+    - /health (load balancer health check)
+    - /docs, /openapi.json (API documentation)
+    """
+    return await auth_middleware(request, call_next, auth)
 
 
 @app.exception_handler(Exception)
@@ -160,8 +203,18 @@ async def metrics() -> MetricsResponse:
 # Debug endpoints (conditionally enabled via DEBUG_MODE)
 if DEBUG_MODE:
     @app.get("/v1/cache/all", tags=["debug"])
-    async def get_all_cached() -> dict:
-        """Get all cached prompts with responses and embeddings."""
+    async def get_all_cached(request: Request) -> dict:
+        """
+        Get all cached prompts with responses and embeddings.
+        
+        ADMIN ONLY: Requires admin API key.
+        
+        Why admin-only? Debug endpoint exposes internal data.
+        Security principle: Least privilege - only admins need cache visibility.
+        """
+        # Enforce admin role (403 if user key)
+        auth.require_admin(request)
+        
         try:
             all_cached = await cache.get_all_cached()
             items_list = []
@@ -186,8 +239,18 @@ if DEBUG_MODE:
             return {"error": str(e)}
 
     @app.delete("/v1/cache/clear", tags=["debug"])
-    async def clear_cache() -> dict:
-        """Clear all cached entries from Redis."""
+    async def clear_cache(request: Request) -> dict:
+        """
+        Clear all cached entries from Redis.
+        
+        ADMIN ONLY: Requires admin API key.
+        
+        Why admin-only? Destructive operation - clears production cache.
+        Security principle: Defense in depth - auth + role check.
+        """
+        # Enforce admin role (403 if user key)
+        auth.require_admin(request)
+        
         try:
             if not cache.client:
                 return {"error": "Redis not connected"}
@@ -211,8 +274,21 @@ if DEBUG_MODE:
             return {"error": str(e)}
 
     @app.post("/v1/cache/test-embeddings", tags=["debug"])
-    async def test_embeddings(request: QueryRequest) -> dict:
-        """Test embedding generation and similarity calculation."""
+    async def test_embeddings(http_request: Request, request: QueryRequest) -> dict:
+        """
+        Test embedding generation and similarity calculation.
+        
+        ADMIN ONLY: Requires admin API key.
+        
+        Why admin-only? Exposes internal ML operations and cache data.
+        
+        Note: Two 'request' params:
+        - http_request: FastAPI Request (for auth check)
+        - request: QueryRequest (Pydantic model for body)
+        """
+        # Enforce admin role (403 if user key)
+        auth.require_admin(http_request)
+        
         try:
             query_embedding = await embedding_model.embed(request.prompt)
             all_cached = await cache.get_all_cached()
