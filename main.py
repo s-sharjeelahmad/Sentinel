@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Security
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
@@ -122,8 +122,37 @@ app = FastAPI(
     title="Sentinel",
     description="Semantic AI Gateway with intelligent caching",
     version="0.1.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    swagger_ui_parameters={
+        "persistAuthorization": True  # Keep API key after page refresh
+    }
 )
+
+# Configure API Key authentication in Swagger UI
+from fastapi.openapi.utils import get_openapi
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    openapi_schema["components"]["securitySchemes"] = {
+        "APIKeyHeader": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key"
+        }
+    }
+    # Apply security to all endpoints globally
+    openapi_schema["security"] = [{"APIKeyHeader": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 
 @app.middleware("http")
@@ -236,13 +265,35 @@ async def metrics_json() -> MetricsResponse:
     This endpoint returns JSON (not Prometheus format).
     Kept for backwards compatibility and quick debugging.
     """
-    stats = await cache.stats()
+    # Get stats from Prometheus metrics (accurate tracking)
+    exact_hits = metrics.sentinel_cache_hits_total.labels(type="exact")._value._value
+    semantic_hits = metrics.sentinel_cache_hits_total.labels(type="semantic")._value._value
+    misses = metrics.sentinel_cache_hits_total.labels(type="miss")._value._value
+    
+    total_hits = exact_hits + semantic_hits
+    total_requests = total_hits + misses
+    hit_rate = (total_hits / total_requests * 100) if total_requests > 0 else 0
+    
+    # Get stored items count from Redis
+    stored_items = 0
+    if cache.client:
+        try:
+            pattern = f"{cache.key_prefix}*"
+            cursor = 0
+            while True:
+                cursor, keys = await cache.client.scan(cursor, match=pattern, count=100)
+                stored_items += len(keys)
+                if cursor == 0:
+                    break
+        except Exception as e:
+            logger.error(f"Error counting Redis keys: {e}")
+    
     return MetricsResponse(
-        total_requests=stats["total_requests"],
-        cache_hits=stats["cache_hits"],
-        cache_misses=stats["cache_misses"],
-        hit_rate_percent=stats["hit_rate_percent"],
-        stored_items=stats["stored_items"],
+        total_requests=int(total_requests),
+        cache_hits=int(total_hits),
+        cache_misses=int(misses),
+        hit_rate_percent=round(hit_rate, 2),
+        stored_items=stored_items,
         uptime_seconds=0
     )
 

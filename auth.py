@@ -236,10 +236,12 @@ async def auth_middleware(request: Request, call_next, auth: APIKeyAuth):
     Excluded routes:
     - /health (load balancer health checks don't have API keys)
     - / (root connectivity check)
+    - /metrics (Prometheus scraping)
+    - /v1/metrics (JSON metrics for monitoring)
     - OpenAPI docs (if enabled)
     """
     # Skip auth for health check and root (public endpoints)
-    if request.url.path in ["/", "/health", "/metrics", "/docs", "/openapi.json"]:
+    if request.url.path in ["/", "/health", "/metrics", "/v1/metrics", "/docs", "/openapi.json"]:
         return await call_next(request)
     
     # Authenticate request

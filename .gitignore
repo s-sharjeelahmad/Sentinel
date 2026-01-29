@@ -32,6 +32,11 @@ venv.bak/
 .env.local
 .env.*.local
 
+# Personal learning docs (not for team/public)
+docs/notes.md
+docs/evolution.md
+docs/deployment.md
+
 # IDE
 .vscode/
 .idea/
