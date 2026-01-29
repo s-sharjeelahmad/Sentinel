@@ -232,8 +232,10 @@ curl -X POST http://localhost:8000/v1/query \
 
 - `200 OK` - Successful response
 - `400 Bad Request` - Invalid input (missing prompt, invalid parameters)
-- `500 Internal Server Error` - LLM API failure or Redis error
-- `503 Service Unavailable` - External services (Jina/Groq) unreachable
+- `401 Unauthorized` - Missing or invalid API key
+- `429 Too Many Requests` - Rate limit exceeded (100 req/min per key)
+- `502 Bad Gateway` - Upstream LLM provider (Groq) unavailable or failed
+- `503 Service Unavailable` - Redis cache or embedding service (Jina) unavailable
 
 **Error Response:**
 
@@ -458,13 +460,15 @@ curl -X POST http://localhost:8000/v1/cache/test-embeddings \
 
 ### Common Error Codes
 
-| Code               | Status | Description                |
-| ------------------ | ------ | -------------------------- |
-| `VALIDATION_ERROR` | 400    | Invalid request parameters |
-| `REDIS_ERROR`      | 503    | Redis connection failed    |
-| `EMBEDDING_ERROR`  | 503    | Jina API unavailable       |
-| `LLM_ERROR`        | 500    | Groq API error             |
-| `RATE_LIMIT_ERROR` | 429    | Groq rate limit exceeded   |
+| Code                   | Status | Description                           |
+| ---------------------- | ------ | ------------------------------------- |
+| `VALIDATION_ERROR`     | 400    | Invalid request parameters            |
+| `UNAUTHORIZED`         | 401    | Missing or invalid API key            |
+| `RATE_LIMIT_ERROR`     | 429    | Rate limit exceeded (100 req/min)     |
+| `LLM_PROVIDER_ERROR`   | 502    | Groq API error (upstream failure)     |
+| `CIRCUIT_BREAKER_OPEN` | 503    | LLM circuit breaker active (cooldown) |
+| `CACHE_ERROR`          | 503    | Redis connection failed               |
+| `EMBEDDING_ERROR`      | 503    | Jina API unavailable                  |
 
 ### Example Error Responses
 
