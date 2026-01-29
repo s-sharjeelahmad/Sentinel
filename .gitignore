@@ -33,6 +33,7 @@ venv.bak/
 .env.*.local
 
 # Personal learning docs (not for team/public)
+docs/SENTINEL_ENGINEERING_JOURNEY.md
 docs/notes.md
 docs/evolution.md
 docs/deployment.md

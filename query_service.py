@@ -44,6 +44,7 @@ from cache_redis import RedisCache
 from embeddings import EmbeddingModel
 from llm_provider import LLMProvider
 from models import QueryRequest, QueryResponse
+from exceptions import EmbeddingServiceError, LLMProviderError
 import metrics  # Prometheus instrumentation
 
 logger = logging.getLogger(__name__)
@@ -118,10 +119,12 @@ class QueryService:
         # Step 1: Generate embedding for semantic search
         # Why try-except? Embedding service can fail (network, API key, rate limit)
         # Graceful degradation: If embeddings fail, we can still do exact match
+        # TRADE-OFF: Availability > semantic matching (fail-open for embeddings)
         try:
             query_embedding = await self.embedding_model.embed(prompt)
-        except Exception as e:
-            logger.error(f"Embedding error: {e}")
+        except EmbeddingServiceError as e:
+            # Expected failure mode - log and degrade gracefully
+            logger.warning(f"Embedding service unavailable, falling back to exact cache only: {e}")
             query_embedding = None
         
         # Step 2: Exact cache hit check
@@ -186,117 +189,25 @@ class QueryService:
         #   → Both see cache miss → Both call LLM → 2x cost (race condition)
         # Solution: Distributed lock (first request locks, calls LLM; second waits for cache)
         
-        try:
-            logger.info(f"Cache MISS: attempting lock for LLM call")
+        logger.info(f"Cache MISS: attempting lock for LLM call")
+        
+        # PHASE 4: Record cache miss metric
+        metrics.record_cache_hit("miss")
+        
+        # Try to acquire distributed lock
+        # Lock key = hash(prompt + model) ensures identical requests share same lock
+        # TTL = 30s prevents deadlock if this process crashes mid-LLM-call
+        lock_acquired = await self.cache.acquire_lock(prompt, request.model, ttl_seconds=30)
+        
+        if lock_acquired:
+            # We got the lock - we're responsible for calling LLM
+            # This is the "fast path" - first request for this prompt
+            logger.info(f"Lock acquired, calling LLM")
             
-            # PHASE 4: Record cache miss metric
-            metrics.record_cache_hit("miss")
+            # PHASE 4: Track active lock
+            metrics.increment_active_locks()
             
-            # Try to acquire distributed lock
-            # Lock key = hash(prompt + model) ensures identical requests share same lock
-            # TTL = 30s prevents deadlock if this process crashes mid-LLM-call
-            lock_acquired = await self.cache.acquire_lock(prompt, request.model, ttl_seconds=30)
-            
-            if lock_acquired:
-                # We got the lock - we're responsible for calling LLM
-                # This is the "fast path" - first request for this prompt
-                logger.info(f"Lock acquired, calling LLM")
-                
-                # PHASE 4: Track active lock
-                metrics.increment_active_locks()
-                
-                try:
-                    llm_result = await self.llm_provider.call(
-                        prompt=prompt,
-                        model=request.model,
-                        temperature=request.temperature,
-                        max_tokens=request.max_tokens
-                    )
-                    
-                    llm_response = llm_result["response"]
-                    cost_usd = llm_result["cost_usd"]
-                    latency_ms = (time.perf_counter() - start_time) * 1000
-                    tokens_used = llm_result["tokens_used"]
-                    
-                    # PHASE 4: Record LLM cost metric
-                    metrics.record_llm_cost(
-                        provider=llm_result.get("provider", "groq"),
-                        model=request.model,
-                        cost_usd=cost_usd
-                    )
-                    
-                    # Store in cache for future queries (and for waiting requests)
-                    # Note: Stores both response AND embedding for semantic search
-                    await self.cache.set(prompt, llm_response, query_embedding)
-                    logger.info(f"LLM call: latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
-                    
-                    return QueryResponse(
-                        response=llm_response,
-                        cache_hit=False,
-                        similarity_score=None,
-                        matched_prompt=None,
-                        provider="groq",
-                        model=request.model,
-                        tokens_used=tokens_used,
-                        latency_ms=latency_ms
-                    )
-                
-                finally:
-                    # Always release lock, even if LLM call fails
-                    # Why finally? Ensures lock released on exception (prevents deadlock)
-                    # If release fails, TTL will expire lock anyway (graceful degradation)
-                    
-                    # PHASE 4: Decrement active lock gauge
-                    metrics.decrement_active_locks()
-                    
-                    await self.cache.release_lock(prompt, request.model)
-                    logger.info(f"Lock released")
-            
-            else:
-                # Lock already held by another request
-                # This is the "slow path" - we arrived while another request is calling LLM
-                # Strategy: Poll cache with exponential backoff until result appears
-                logger.info(f"Lock held by another request, polling cache")
-                
-                # Polling parameters
-                max_wait_seconds = 30  # Match lock TTL
-                poll_interval_ms = 100  # Start with 100ms
-                max_poll_interval_ms = 2000  # Cap at 2s
-                
-                elapsed = 0
-                while elapsed < max_wait_seconds:
-                    # Wait before polling (exponential backoff)
-                    await asyncio.sleep(poll_interval_ms / 1000)
-                    elapsed += poll_interval_ms / 1000
-                    
-                    # Check if cache now has the result
-                    cached_response, is_hit = await self.cache.get(prompt)
-                    if is_hit:
-                        latency_ms = (time.perf_counter() - start_time) * 1000
-                        logger.info(f"Cache populated by other request: latency={latency_ms:.1f}ms (waited {elapsed:.1f}s)")
-                        
-                        # PHASE 4: This is effectively an exact cache hit (waited for lock holder)
-                        # Already recorded cache miss earlier, so don't double-count
-                        
-                        return QueryResponse(
-                            response=cached_response or "",
-                            cache_hit=True,
-                            similarity_score=1.0,
-                            matched_prompt=prompt,
-                            provider=request.provider,
-                            model=request.model,
-                            tokens_used=0,
-                            latency_ms=latency_ms
-                        )
-                    
-                    # Exponential backoff: double interval, cap at max
-                    poll_interval_ms = min(poll_interval_ms * 2, max_poll_interval_ms)
-                
-                # Timeout: Other request took too long or failed
-                # Fallback: Try calling LLM ourselves (lock may have expired)
-                logger.warning(f"Polling timeout after {max_wait_seconds}s, attempting LLM call")
-                
-                # Retry LLM call (lock should have expired by now)
+            try:
                 llm_result = await self.llm_provider.call(
                     prompt=prompt,
                     model=request.model,
@@ -309,15 +220,17 @@ class QueryService:
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 tokens_used = llm_result["tokens_used"]
                 
-                # PHASE 4: Record LLM cost metric (timeout fallback path)
+                # PHASE 4: Record LLM cost metric
                 metrics.record_llm_cost(
                     provider=llm_result.get("provider", "groq"),
                     model=request.model,
                     cost_usd=cost_usd
                 )
                 
+                # Store in cache for future queries (and for waiting requests)
+                # Note: Stores both response AND embedding for semantic search
                 await self.cache.set(prompt, llm_response, query_embedding)
-                logger.info(f"LLM call (after timeout): latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
+                logger.info(f"LLM call: latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
                 
                 return QueryResponse(
                     response=llm_response,
@@ -329,20 +242,107 @@ class QueryService:
                     tokens_used=tokens_used,
                     latency_ms=latency_ms
                 )
+            
+            finally:
+                # Always release lock, even if LLM call fails
+                # Why finally? Ensures lock released on exception (prevents deadlock)
+                # If release fails, TTL will expire lock anyway (graceful degradation)
+                
+                # PHASE 4: Decrement active lock gauge
+                metrics.decrement_active_locks()
+                
+                await self.cache.release_lock(prompt, request.model)
+                logger.info(f"Lock released")
         
-        except Exception as e:
-            # Error handling: Return error response instead of raising
-            # Trade-off: API stays stable (200 OK) but client sees error in response
-            # Better approach (Phase 5): Return 5xx status, implement retry logic
-            logger.error(f"LLM call failed: {e}")
+        else:
+            # Lock already held by another request
+            # This is the "slow path" - we arrived while another request is calling LLM
+            # Strategy: Poll cache with exponential backoff until result appears
+            logger.info(f"Lock held by another request, polling cache")
+            
+            # Polling parameters
+            max_wait_seconds = 30  # Match lock TTL
+            poll_interval_ms = 100  # Start with 100ms
+            max_poll_interval_ms = 2000  # Cap at 2s
+            
+            elapsed = 0
+            while elapsed < max_wait_seconds:
+                # Wait before polling (exponential backoff)
+                await asyncio.sleep(poll_interval_ms / 1000)
+                elapsed += poll_interval_ms / 1000
+                
+                # Check if cache now has the result
+                cached_response, is_hit = await self.cache.get(prompt)
+                if is_hit:
+                    latency_ms = (time.perf_counter() - start_time) * 1000
+                    logger.info(f"Cache populated by other request: latency={latency_ms:.1f}ms (waited {elapsed:.1f}s)")
+                    
+                    # PHASE 4: This is effectively an exact cache hit (waited for lock holder)
+                    # Already recorded cache miss earlier, so don't double-count
+                    
+                    return QueryResponse(
+                        response=cached_response or "",
+                        cache_hit=True,
+                        similarity_score=1.0,
+                        matched_prompt=prompt,
+                        provider=request.provider,
+                        model=request.model,
+                        tokens_used=0,
+                        latency_ms=latency_ms
+                    )
+                
+                # Exponential backoff: double interval, cap at max
+                poll_interval_ms = min(poll_interval_ms * 2, max_poll_interval_ms)
+            
+            # Timeout: Other request took too long or failed
+            # Fallback: Try calling LLM ourselves (lock may have expired)
+            logger.warning(f"Polling timeout after {max_wait_seconds}s, attempting LLM call")
+            
+            # Retry LLM call (lock should have expired by now)
+            llm_result = await self.llm_provider.call(
+                prompt=prompt,
+                model=request.model,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens
+            )
+            
+            llm_response = llm_result["response"]
+            cost_usd = llm_result["cost_usd"]
             latency_ms = (time.perf_counter() - start_time) * 1000
+            tokens_used = llm_result["tokens_used"]
+            
+            # PHASE 4: Record LLM cost metric (timeout fallback path)
+            metrics.record_llm_cost(
+                provider=llm_result.get("provider", "groq"),
+                model=request.model,
+                cost_usd=cost_usd
+            )
+            
+            await self.cache.set(prompt, llm_response, query_embedding)
+            logger.info(f"LLM call (after timeout): latency={latency_ms:.1f}ms | cost=${cost_usd:.6f} | tokens={tokens_used}")
+            
             return QueryResponse(
-                response=f"Error: {str(e)}",
+                response=llm_response,
                 cache_hit=False,
                 similarity_score=None,
                 matched_prompt=None,
-                provider="error",
+                provider="groq",
                 model=request.model,
-                tokens_used=0,
+                tokens_used=tokens_used,
                 latency_ms=latency_ms
             )
+        
+        # NOTE: No except block here - let exceptions propagate to API layer
+        # Why? Service layer is transport-agnostic (doesn't know about HTTP).
+        # API layer (main.py) catches exceptions and maps to HTTP status codes.
+        #
+        # Possible exceptions from this method:
+        #   - LLMProviderError: LLM API failed (maps to 502 Bad Gateway)
+        #   - CircuitBreakerOpenError: Circuit breaker open (maps to 503)
+        #   - CacheError: Redis failed (maps to 503)
+        #
+        # INTERVIEW POINT:
+        #   "Why not catch exceptions here?"
+        #   Answer: "Service layer should be transport-agnostic. HTTP semantics
+        #   (status codes, response format) belong in the API layer only.
+        #   This enables the same service to work with HTTP, gRPC, CLI, etc."

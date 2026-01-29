@@ -25,6 +25,13 @@ from llm_provider import initialize_llm_provider, cleanup_llm_provider
 from query_service import QueryService
 from auth import APIKeyAuth, auth_middleware
 from rate_limiter import TokenBucketRateLimiter
+from exceptions import (
+    LLMProviderError,
+    CircuitBreakerOpenError,
+    EmbeddingServiceError,
+    CacheError,
+    ShutdownInProgressError
+)
 import metrics  # Prometheus instrumentation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -222,11 +229,98 @@ async def authentication_middleware(request: Request, call_next):
     return await auth_middleware(request, call_next, auth)
 
 
+# EXCEPTION HANDLERS: Map service exceptions to HTTP status codes
+# Why here and not in service? Service layer is transport-agnostic.
+# HTTP semantics (status codes) belong in API layer only.
+
+@app.exception_handler(LLMProviderError)
+async def llm_provider_error_handler(request: Request, exc: LLMProviderError):
+    """
+    LLM API call failed (Groq, OpenAI, etc.).
+    
+    Status: 502 Bad Gateway
+    Why: Upstream service (LLM provider) returned error or timed out.
+    Client action: Retry with exponential backoff.
+    
+    INTERVIEW POINT:
+        "Why 502 instead of 500?"
+        Answer: "502 indicates the problem is with an upstream service,
+        not our code. This helps with debugging and monitoring."
+    """
+    logger.error(f"LLM provider error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": "llm_provider_unavailable",
+            "message": str(exc),
+            "retry": True
+        }
+    )
+
+
+@app.exception_handler(CircuitBreakerOpenError)
+async def circuit_breaker_error_handler(request: Request, exc: CircuitBreakerOpenError):
+    """
+    Circuit breaker is open - LLM API failing repeatedly.
+    
+    Status: 503 Service Unavailable
+    Why: System is protecting itself from cascading failure.
+    Client action: Back off and retry after cooldown period (60s).
+    
+    TRADE-OFF: Fail-closed (reject requests) > cascading failure.
+    """
+    logger.warning(f"Circuit breaker open: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "circuit_breaker_open",
+            "message": "LLM service is temporarily unavailable",
+            "retry_after": 60  # Circuit breaker cooldown period
+        },
+        headers={"Retry-After": "60"}
+    )
+
+
+@app.exception_handler(CacheError)
+async def cache_error_handler(request: Request, exc: CacheError):
+    """
+    Redis cache operation failed.
+    
+    Status: 503 Service Unavailable
+    Why: Cache is down, can't guarantee cost-effective operation.
+    
+    TRADE-OFF: Fail-closed (reject) > expensive LLM calls.
+    Could fail-open and serve expensive requests, but defeats the purpose.
+    """
+    logger.error(f"Cache error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "cache_unavailable",
+            "message": "Cache service is temporarily unavailable",
+            "retry": True
+        }
+    )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """Handle unhandled exceptions."""
-    logger.error(f"Error: {exc}", exc_info=True)
-    return JSONResponse(status_code=500, content={"error": "internal_error"})
+    """
+    Handle unhandled exceptions (last resort).
+    
+    Status: 500 Internal Server Error
+    Why: Unexpected error in our code (not upstream dependency).
+    
+    NOTE: If we see these in logs, it's a bug - add specific handler.
+    """
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_error",
+            "message": "An unexpected error occurred"
+        }
+    )
 
 
 @app.get("/", tags=["health"])

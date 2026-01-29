@@ -10,6 +10,8 @@ from enum import Enum
 
 import aiohttp
 
+from exceptions import LLMProviderError, CircuitBreakerOpenError
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +41,9 @@ class CircuitBreaker:
                 self.state = CircuitBreakerState.HALF_OPEN
                 logger.info("Circuit breaker: HALF_OPEN - attempting recovery")
             else:
-                raise RuntimeError("Circuit breaker OPEN - LLM API unavailable")
+                # BOUNDARY: Raise domain exception, not HTTP response
+                # API layer maps this to 503 Service Unavailable
+                raise CircuitBreakerOpenError("Circuit breaker OPEN - LLM API unavailable")
         
         try:
             result = await coro
@@ -108,7 +112,9 @@ class GroqProvider(LLMProvider):
     async def call(self, prompt: str, model: str = "llama-3.1-8b-instant", temperature: float = 0.7, max_tokens: int = 500) -> Dict[str, Any]:
         """Call Groq API with exponential backoff retry logic and circuit breaker protection."""
         if not self.api_key:
-            raise RuntimeError("GROQ_API_KEY not set. export GROQ_API_KEY=your_key")
+            # CONFIGURATION ERROR: This should be caught at startup, not here
+            # But if it happens, raise domain exception
+            raise LLMProviderError("GROQ_API_KEY not set. export GROQ_API_KEY=your_key")
         
         if self.session is None:
             await self.connect()
@@ -142,7 +148,8 @@ class GroqProvider(LLMProvider):
             
             except aiohttp.ClientSSLError as e:
                 logger.error(f"SSL error: {e}")
-                raise
+                # SSL errors are not retryable - fail immediately
+                raise LLMProviderError(f"SSL error connecting to LLM API: {e}") from e
             
             except aiohttp.ClientConnectorError as e:
                 logger.error(f"Connection error (attempt {attempt+1}/{self.MAX_RETRIES}): {e}")
@@ -150,7 +157,8 @@ class GroqProvider(LLMProvider):
                     await asyncio.sleep(backoff_sec)
                     backoff_sec *= 2
                 else:
-                    raise
+                    # Exhausted retries - wrap in domain exception
+                    raise LLMProviderError(f"LLM API unreachable after {self.MAX_RETRIES} attempts: {e}") from e
             
             except asyncio.TimeoutError as e:
                 logger.error(f"Timeout (attempt {attempt+1}/{self.MAX_RETRIES}): {e}")
@@ -158,13 +166,16 @@ class GroqProvider(LLMProvider):
                     await asyncio.sleep(backoff_sec)
                     backoff_sec *= 2
                 else:
-                    raise
+                    # Exhausted retries - wrap in domain exception
+                    raise LLMProviderError(f"LLM API timeout after {self.MAX_RETRIES} attempts (>{self.REQUEST_TIMEOUT_SEC}s each)") from e
             
             except Exception as e:
+                # Unexpected errors (ValueError from API response parsing, etc.)
                 logger.error(f"Error: {type(e).__name__}: {e}")
-                raise
+                raise LLMProviderError(f"LLM API call failed: {e}") from e
         
-        raise RuntimeError("Max retries exceeded")
+        # Should never reach here, but if we do, it's a provider error
+        raise LLMProviderError("Max retries exceeded")
     
     async def _call_groq_api(self, prompt: str, model: str, temperature: float, max_tokens: int) -> Dict[str, Any]:
         """Make HTTP request to Groq API."""
@@ -174,23 +185,29 @@ class GroqProvider(LLMProvider):
         try:
             async with self.session.post(self.GROQ_API_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=self.REQUEST_TIMEOUT_SEC)) as response:
                 if response.status == 401:
-                    raise ValueError("Invalid API key (401)")
+                    # Configuration error - API key is wrong
+                    raise LLMProviderError("Invalid API key (401)")
                 elif response.status == 429:
-                    raise ValueError("Rate limited (429)")
+                    # Rate limit - let retry logic handle this
+                    raise LLMProviderError("Rate limited (429)")
                 elif response.status >= 400:
                     error_text = await response.text()
-                    raise ValueError(f"HTTP {response.status}: {error_text}")
+                    # Upstream error - map to domain exception
+                    raise LLMProviderError(f"HTTP {response.status}: {error_text}")
                 
                 response_json = await response.json()
                 if "choices" not in response_json or not response_json["choices"]:
-                    raise ValueError("Invalid response: missing choices")
+                    # Malformed response
+                    raise LLMProviderError("Invalid response: missing choices")
                 
                 return response_json
         except aiohttp.ClientConnectorError as e:
             logger.error(f"Network error: {e}")
+            # Re-raise as-is, retry logic will catch and wrap it
             raise
         except asyncio.TimeoutError:
             logger.error(f"Request timeout after {self.REQUEST_TIMEOUT_SEC}s")
+            # Re-raise as-is, retry logic will catch and wrap it
             raise
     
     def _calculate_cost(self, input_tokens: int, output_tokens: int) -> float:

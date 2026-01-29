@@ -6,6 +6,8 @@ import aiohttp
 from typing import Optional
 import numpy as np
 
+from exceptions import EmbeddingServiceError
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,7 +18,8 @@ class EmbeddingModel:
         self.model_name = model_name
         self.api_token = os.getenv("JINA_API_KEY")
         if not self.api_token:
-            raise ValueError("JINA_API_KEY environment variable required")
+            # Configuration error - should be caught at startup
+            raise EmbeddingServiceError("JINA_API_KEY environment variable required")
         
         self.api_url = "https://api.jina.ai/v1/embeddings"
         self.embedding_dim = 1024
@@ -34,7 +37,7 @@ class EmbeddingModel:
     async def embed(self, text: str) -> np.ndarray:
         """Convert text to embedding vector."""
         if not self.session:
-            raise RuntimeError("Model not loaded. Call load() first.")
+            raise EmbeddingServiceError("Model not loaded. Call load() first.")
         
         try:
             headers = {
@@ -49,7 +52,8 @@ class EmbeddingModel:
             async with self.session.post(self.api_url, json=payload, headers=headers, timeout=30) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    raise Exception(f"Jina API error {resp.status}: {error_text}")
+                    # Upstream API error - wrap in domain exception
+                    raise EmbeddingServiceError(f"Jina API error {resp.status}: {error_text}")
                 
                 result = await resp.json()
                 
@@ -58,12 +62,13 @@ class EmbeddingModel:
                 embedding_data = result["data"][0]["embedding"]
                 embedding = np.array(embedding_data, dtype=np.float32)
             else:
-                raise ValueError(f"Unexpected API response format: {result}")
+                raise EmbeddingServiceError(f"Unexpected API response format: {result}")
             
             return embedding
         except (ValueError, KeyError, OSError, asyncio.TimeoutError) as e:
             logger.error(f"Error embedding text: {e}")
-            raise
+            # Wrap all infrastructure errors in domain exception
+            raise EmbeddingServiceError(f"Embedding generation failed: {e}") from e
     
     async def close(self) -> None:
         """Close async session."""
