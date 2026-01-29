@@ -489,13 +489,72 @@ for retry in range(3):
 
 ---
 
-## Next Steps for V2
+## Security & Access Control
 
-**Potential Enhancements:**
+### Authentication (Implemented ✅)
+
+**Mechanism:** API key-based authentication via `X-API-Key` header.
+
+**Key Types:**
+
+| Type  | Access                                              | Example              |
+| ----- | --------------------------------------------------- | -------------------- |
+| User  | `/v1/query`, `/health`, `/docs`, `/metrics`         | `sk_user_xyz...`     |
+| Admin | All endpoints (includes `/v1/cache/*` debug routes) | `sk_admin_secret123` |
+
+**Why This Design:**
+
+- **Simple:** No JWT complexity, no token refresh logic
+- **Secure:** Header-based (not URL param), constant-time comparison
+- **Auditable:** Easy to revoke individual keys
+- **Stateless:** No session storage required
+
+### Rate Limiting (Implemented ✅)
+
+**Token Bucket Algorithm:**
+
+- **Limit:** 100 requests per minute (configurable)
+- **Per-Key:** Each API key has its own bucket
+- **Redis-Backed:** Distributed rate limiting across instances
+
+**Response Headers:**
+
+- `X-RateLimit-Limit: 100`
+- `X-RateLimit-Remaining: 87`
+- `X-RateLimit-Reset: 1234567890` (Unix timestamp)
+
+**Error Handling:**
+
+- `429 Too Many Requests` - Rate limit exceeded
+- Response includes `Retry-After` header
+
+### Observability (Implemented ✅)
+
+**Prometheus Metrics:**
+
+- `sentinel_requests_total` - Total requests by endpoint, status, API key role
+- `sentinel_cache_hits_total` - Cache hits by type (exact, semantic, miss)
+- `sentinel_latency_ms` - Request duration distribution
+- `sentinel_tokens_used_total` - LLM token usage
+- `sentinel_costs_usd_total` - API call costs
+
+**Metrics Endpoint:**
+
+- `GET /metrics` - Prometheus format (raw metrics)
+- `GET /v1/metrics` - JSON format (cache statistics)
+
+**Health Checks:**
+
+- `GET /health` - Service health + Redis connectivity
+
+---
+
+## Future Enhancements (Post-V2)
+
+**Potential Additions:**
 
 - Streaming responses (chunked transfer for perceived latency reduction)
 - Multi-provider support (OpenAI, Anthropic, Cohere)
-- Authentication (API keys, JWT)
-- Rate limiting (per-client quotas)
 - Cache invalidation API (manual cache clearing)
-- Observability (Prometheus metrics, OpenTelemetry tracing)
+- Advanced RBAC (granular permissions, resource-level control)
+- Webhook notifications (cache hits/misses alerts)

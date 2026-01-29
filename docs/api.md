@@ -22,9 +22,39 @@ https://sentinel-ai-gateway.fly.dev
 
 ## Authentication
 
-Currently **no authentication** required (public API for testing).
+**API key authentication required** for all endpoints except health checks.
 
-**Future:** API key authentication via `X-API-Key` header.
+**Mechanism:** Include `X-API-Key` header with every request (except `GET /` and `GET /health`).
+
+**Key Types:**
+
+| Key Type | Access                                                          | Example            |
+| -------- | --------------------------------------------------------------- | ------------------ |
+| User     | `/v1/query`, `/health`, `/`, `/docs`, `/metrics`, `/v1/metrics` | sk_user_xyz...     |
+| Admin    | All endpoints (includes `/v1/cache/*` debug endpoints)          | sk_admin_secret123 |
+
+**Example Request:**
+
+```bash
+curl -X POST http://localhost:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: sk_user_xyz123" \
+  -d '{"prompt": "Explain quantum computing"}'
+```
+
+**Rate Limiting:**
+
+- **Limit:** 100 requests per minute (configurable)
+- **Enforcement:** Per API key
+- **Headers Returned:**
+  - `X-RateLimit-Limit: 100`
+  - `X-RateLimit-Remaining: 87`
+  - `X-RateLimit-Reset: 1234567890`
+
+**Status Codes:**
+
+- `401 Unauthorized` - Missing or invalid API key
+- `429 Too Many Requests` - Rate limit exceeded
 
 ---
 
@@ -96,6 +126,7 @@ curl http://localhost:8000/health
 
 ```
 Content-Type: application/json
+X-API-Key: sk_user_xyz123
 ```
 
 **Request Body:**
@@ -127,6 +158,7 @@ Content-Type: application/json
 ```bash
 curl -X POST http://localhost:8000/v1/query \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: sk_user_xyz123" \
   -d '{
     "prompt": "Explain quantum computing in simple terms",
     "temperature": 0.5,
@@ -218,12 +250,13 @@ curl -X POST http://localhost:8000/v1/query \
 
 **GET /v1/metrics** - Cache performance statistics
 
-**Description:** Returns cache hit rate, total requests, and stored items.
+**Description:** Returns cache hit rate, total requests, and stored items. Requires user or admin API key.
 
 **Request:**
 
 ```bash
-curl http://localhost:8000/v1/metrics
+curl http://localhost:8000/v1/metrics \
+  -H "X-API-Key: sk_user_xyz123"
 ```
 
 **Response:**
